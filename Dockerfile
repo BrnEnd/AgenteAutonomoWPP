@@ -1,5 +1,5 @@
-# Usar Node 18 Alpine (imagem mais leve)
-FROM node:18-alpine
+# Usar Node 20 Alpine (requerido pelo Baileys)
+FROM node:20-alpine
 
 # Instalar apenas dependências básicas
 RUN apk add --no-cache \
