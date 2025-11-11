@@ -1,17 +1,16 @@
 require('dotenv').config();
-const wppconnect = require('@wppconnect-team/wppconnect');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 const express = require('express');
 const OpenAI = require('openai');
+const fs = require('fs');
+const pino = require('pino');
 
 // ----------------------
 // CONFIGURAÇÕES
 // ----------------------
 const PORT = process.env.PORT || 3000;
-
-// GROQ API - TOTALMENTE GRATUITO
-const GROQ_API_KEY = process.env.GROQ_API_KEY; // Pegar em https://console.groq.com
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.2-3b-preview'; 
-// Modelos disponíveis: llama-3.2-3b-preview, llama-3.1-8b-instant, mixtral-8x7b-32768
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.2-3b-preview';
 
 const groq = new OpenAI({
   apiKey: GROQ_API_KEY,
@@ -24,59 +23,46 @@ const groq = new OpenAI({
 const app = express();
 app.use(express.json());
 
-let clientInstance = null;
 let qrCodeData = null;
 let isConnected = false;
+let sock = null;
 
-// Endpoint para verificar status
 app.get('/status', (req, res) => {
   res.json({
     connected: isConnected,
     hasQR: !!qrCodeData,
-    timestamp: new Date(),
-    model: GROQ_MODEL
+    timestamp: new Date()
   });
 });
 
-// Endpoint para obter QR Code
 app.get('/qr', (req, res) => {
   if (isConnected) {
-    return res.json({ message: 'Bot já conectado!', connected: true });
+    return res.json({ message: 'Bot já conectado', connected: true });
   }
   
   if (!qrCodeData) {
-    return res.status(404).json({ error: 'QR Code ainda não gerado. Aguarde...' });
+    return res.status(404).json({ error: 'QR Code ainda não gerado' });
   }
   
   res.json({ qr: qrCodeData, connected: false });
 });
 
-// Health check
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     uptime: process.uptime(),
     provider: 'Groq (Free)',
-    model: GROQ_MODEL
+    model: GROQ_MODEL,
+    library: 'Baileys'
   });
 });
 
-// Endpoint de teste da IA
-app.post('/test-ai', async (req, res) => {
-  try {
-    const { message } = req.body;
-    const response = await gerarRespostaIA(message || 'Olá, como você está?');
-    res.json({ response, model: GROQ_MODEL });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 app.listen(PORT, () => {
-      console.log(`[API] Rodando na porta ${PORT}`);
+  console.log(`[API] Rodando na porta ${PORT}`);
   console.log(`[API] QR Code: http://localhost:${PORT}/qr`);
   console.log(`[API] Provider: Groq (Free)`);
   console.log(`[API] Modelo: ${GROQ_MODEL}`);
+  console.log(`[API] Library: Baileys (lightweight)`);
 });
 
 // ----------------------
@@ -87,10 +73,9 @@ async function gerarRespostaIA(perguntaDoUsuario) {
     const systemPrompt =
       "Você é um assistente virtual brasileiro simpático e prestativo. " +
       "Responda de forma clara, direta e natural, como se estivesse conversando pelo WhatsApp. " +
-      "Use português brasileiro, seja objetivo e evite respostas muito longas. " +
-      "Não use formatações especiais, símbolos ou emojis em excesso.";
+      "Use português brasileiro, seja objetivo e evite respostas muito longas.";
 
-    console.log('Consultando Groq AI...');
+    console.log('[GROQ] Consultando Groq AI...');
     
     const response = await groq.chat.completions.create({
       model: GROQ_MODEL,
@@ -101,162 +86,146 @@ async function gerarRespostaIA(perguntaDoUsuario) {
       temperature: 0.7,
       max_tokens: 500,
       top_p: 0.9,
-      // Groq é MUITO rápido, não precisa ajustar stream
     });
 
     const content = response?.choices?.[0]?.message?.content || 
                     "Desculpe, não consegui gerar uma resposta agora.";
     
-    // Limpar formatação para WhatsApp
-    return content
-      .replace(/[*_`#<>~]/g, '') // Remove markdown
-      .replace(/\n{3,}/g, '\n\n') // Max 2 quebras de linha
-      .trim();
+    return content.replace(/[*_`#<>~]/g, '').trim();
       
   } catch (error) {
-    console.error('Erro ao chamar Groq:', error.message);
+    console.error('[ERROR] Erro ao chamar Groq:', error.message);
     
-    // Tratamento de erros específicos
     if (error.status === 429) {
-      return "Desculpe, estou recebendo muitas mensagens. Aguarde alguns segundos e tente novamente.";
+      return "Desculpe, estou recebendo muitas mensagens. Aguarde alguns segundos.";
     }
     
     if (error.status === 401) {
-      console.error('GROQ_API_KEY inválida! Configure no .env');
-      return "Erro de configuração. Por favor, contate o administrador.";
+      console.error('[ERROR] GROQ_API_KEY inválida');
+      return "Erro de configuração.";
     }
     
-    return "Desculpe, estou com problemas técnicos no momento. Tente novamente em instantes.";
+    return "Desculpe, estou com problemas técnicos no momento.";
   }
 }
 
 // ----------------------
-// INICIAR BOT WHATSAPP
+// INICIAR BOT WHATSAPP (BAILEYS)
 // ----------------------
-console.log('Iniciando bot WhatsApp com Groq AI...');
-
-wppconnect.create({
-  session: 'groq_bot',
-  headless: true,
-  useChrome: false,
-  autoClose: 60000,
-  logQR: false,
+async function connectToWhatsApp() {
+  const authFolder = './tokens';
   
-  statusFind: (statusSession, session) => {
-    console.log(`Status: ${statusSession}`);
-    
-    if (statusSession === 'qrReadSuccess') {
+  // Criar pasta de autenticação se não existir
+  if (!fs.existsSync(authFolder)) {
+    fs.mkdirSync(authFolder, { recursive: true });
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+
+  sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: false,
+    logger: pino({ level: 'silent' }),
+    browser: ['Bot', 'Chrome', '1.0.0'],
+  });
+
+  // Evento: QR Code
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      qrCodeData = qr;
+      console.log('[QR] QR Code gerado - acesse /qr para visualizar');
+    }
+
+    if (connection === 'close') {
+      isConnected = false;
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      
+      console.log('[STATUS] Conexão fechada. Reconectando:', shouldReconnect);
+      
+      if (shouldReconnect) {
+        connectToWhatsApp();
+      }
+    } else if (connection === 'open') {
       isConnected = true;
       qrCodeData = null;
-      console.log('QR Code escaneado com sucesso!');
+      console.log('[STATUS] Bot conectado com sucesso');
     }
-    
-    if (statusSession === 'isLogged') {
-      isConnected = true;
-      console.log('Bot conectado e pronto!');
-    }
-    
-    if (statusSession === 'notLogged') {
-      isConnected = false;
-      console.log('Aguardando login...');
-    }
-  },
-  
-  catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
-    console.log(`QR Code gerado (tentativa ${attempts}/${5})`);
-    qrCodeData = base64Qr;
-  },
-  
-}).then(client => {
-  clientInstance = client;
-  isConnected = true;
-  console.log('Bot iniciado e aguardando mensagens...');
+  });
 
-  // Listener de mensagens
-  client.onMessage(async message => {
-    try {
-      // Apenas mensagens privadas de texto
-      if (!message.isGroupMsg && message.type === 'chat') {
-        const textoRecebido = message.body?.trim() || '';
-        if (!textoRecebido) return;
+  // Salvar credenciais quando atualizadas
+  sock.ev.on('creds.update', saveCreds);
 
-        console.log(`\nMensagem de ${message.from}:`);
-        console.log(`   "${textoRecebido}"`);
+  // Evento: Mensagens
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
 
+    for (const msg of messages) {
+      // Ignorar mensagens próprias e de grupos
+      if (msg.key.fromMe || msg.key.remoteJid.includes('@g.us')) continue;
+
+      const text = msg.message?.conversation || 
+                   msg.message?.extendedTextMessage?.text || '';
+
+      if (!text.trim()) continue;
+
+      const sender = msg.key.remoteJid;
+
+      console.log(`\n[MESSAGE] Mensagem de ${sender}:`);
+      console.log(`[MESSAGE] "${text}"`);
+
+      try {
         // Indicador de digitação
-        await client.startTyping(message.from);
+        await sock.sendPresenceUpdate('composing', sender);
 
-        // Gerar resposta IA (Groq é super rápido!)
+        // Gerar resposta IA
         const startTime = Date.now();
-        const respostaIA = await gerarRespostaIA(textoRecebido);
+        const respostaIA = await gerarRespostaIA(text);
         const responseTime = Date.now() - startTime;
-        
-        console.log(`Resposta gerada em ${responseTime}ms:`);
-        console.log(`   "${respostaIA.substring(0, 100)}${respostaIA.length > 100 ? '...' : ''}"`);
+
+        console.log(`[RESPONSE] Resposta gerada em ${responseTime}ms:`);
+        console.log(`[RESPONSE] "${respostaIA.substring(0, 100)}${respostaIA.length > 100 ? '...' : ''}"`);
 
         // Enviar resposta
-        await client.sendText(message.from, respostaIA);
-        console.log(`Mensagem enviada!\n`);
+        await sock.sendMessage(sender, { text: respostaIA });
+        console.log(`[SENT] Mensagem enviada\n`);
 
         // Parar indicador de digitação
-        await client.stopTyping(message.from);
-      }
-    } catch (err) {
-      console.error('Erro ao processar mensagem:', err?.message || err);
-      
-      // Tentar enviar mensagem de erro ao usuário
-      try {
-        await client.sendText(
-          message.from, 
-          'Desculpe, ocorreu um erro ao processar sua mensagem. Tente novamente.'
-        );
-      } catch (sendError) {
-        console.error(' Não foi possível enviar mensagem de erro');
+        await sock.sendPresenceUpdate('paused', sender);
+
+      } catch (error) {
+        console.error('[ERROR] Erro ao processar mensagem:', error.message);
+        
+        try {
+          await sock.sendMessage(sender, { 
+            text: 'Desculpe, ocorreu um erro. Tente novamente.' 
+          });
+        } catch (sendError) {
+          console.error('[ERROR] Não foi possível enviar mensagem de erro');
+        }
       }
     }
   });
+}
 
-  // Listener de estado da conexão
-  client.onStateChange(state => {
-    console.log(`Estado alterado: ${state}`);
-    
-    if (state === 'CONFLICT' || state === 'UNLAUNCHED') {
-      isConnected = false;
-      console.log('Conexão perdida. Tentando reconectar...');
-      client.useHere();
-    }
-  });
-
-  // Listener de ACK (confirmação de leitura)
-  client.onAck(ack => {
-    const status = {
-      '-1': 'Erro',
-      '0': 'Aguardando',
-      '1': '✓ Enviado',
-      '2': '✓✓ Recebido',
-      '3': '✓✓ Lido'
-    };
-    console.log(`📬 Status: ${status[ack.ack] || ack.ack}`);
-  });
-
-}).catch(error => {
-  console.error('Falha ao iniciar o bot:', error?.message || error);
-  process.exit(1);
-});
+// Iniciar conexão
+console.log('[BOT] Iniciando bot WhatsApp com Baileys...');
+connectToWhatsApp();
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-  console.log('\nEncerrando bot gracefully...');
-  if (clientInstance) {
-    await clientInstance.close();
+  console.log('\n[SHUTDOWN] Encerrando bot...');
+  if (sock) {
+    await sock.logout();
   }
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
-  console.log('\n Recebido SIGTERM, encerrando...');
-  if (clientInstance) {
-    await clientInstance.close();
+  console.log('\n[SHUTDOWN] Recebido SIGTERM, encerrando...');
+  if (sock) {
+    await sock.logout();
   }
   process.exit(0);
 });
