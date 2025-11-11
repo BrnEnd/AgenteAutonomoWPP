@@ -4,6 +4,8 @@ const express = require('express');
 const OpenAI = require('openai');
 const fs = require('fs');
 const pino = require('pino');
+const db = require('./database/connection');
+const queries = require('./database/queries');
 
 // ----------------------
 // CONFIGURAÇÕES
@@ -18,87 +20,323 @@ const groq = new OpenAI({
 });
 
 // ----------------------
-// EXPRESS API (QR CODE)
+// MULTI-SESSÃO: GERENCIAMENTO DE SESSÕES ATIVAS
+// ----------------------
+// Map para armazenar todas as sessões ativas
+// Key: session_name, Value: { sock, sessaoId, clienteId, whatsappNumero, contexto }
+const activeSessions = new Map();
+
+// ----------------------
+// EXPRESS API
 // ----------------------
 const app = express();
 app.use(express.json());
 
-let qrCodeData = null;
-let isConnected = false;
-let sock = null;
-
-app.get('/status', (req, res) => {
+// Health check
+app.get('/health', (req, res) => {
   res.json({
-    connected: isConnected,
-    hasQR: !!qrCodeData,
+    status: 'ok',
+    uptime: process.uptime(),
+    provider: 'Groq (Free)',
+    model: GROQ_MODEL,
+    library: 'Baileys',
+    activeSessions: activeSessions.size,
     timestamp: new Date()
   });
 });
 
-app.get('/qr', (req, res) => {
-  if (isConnected) {
-    return res.json({ message: 'Bot já conectado', connected: true });
-  }
-  
-  if (!qrCodeData) {
-    return res.status(404).json({ error: 'QR Code ainda não gerado' });
-  }
-  
-  res.json({ qr: qrCodeData, connected: false });
-});
+// Status geral do sistema
+app.get('/status', (req, res) => {
+  const sessions = [];
+  activeSessions.forEach((session, sessionName) => {
+    sessions.push({
+      sessionName,
+      whatsappNumero: session.whatsappNumero,
+      connected: session.connected || false,
+      clienteNome: session.clienteNome
+    });
+  });
 
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    uptime: process.uptime(),
-    provider: 'Groq (Free)',
-    model: GROQ_MODEL,
-    library: 'Baileys'
+  res.json({
+    activeSessions: activeSessions.size,
+    sessions,
+    timestamp: new Date()
   });
 });
 
-// Endpoint para limpar sessão (útil para debug)
-app.post('/reset', async (req, res) => {
+// ----------------------
+// ROTAS CRUD - CLIENTES
+// ----------------------
+
+// Criar novo cliente
+app.post('/clientes', async (req, res) => {
   try {
-    const fs = require('fs');
-    const authFolder = './tokens';
-    
-    if (fs.existsSync(authFolder)) {
-      fs.rmSync(authFolder, { recursive: true, force: true });
-      console.log('[RESET] Sessão limpa com sucesso');
+    const { nome, email, telefone, contextoArquivo } = req.body;
+
+    if (!nome || !contextoArquivo) {
+      return res.status(400).json({ error: 'Nome e contextoArquivo são obrigatórios' });
     }
-    
-    res.json({ success: true, message: 'Sessão limpa. Reinicie o bot.' });
-    
-    // Reiniciar conexão
-    setTimeout(() => {
-      process.exit(0); // Railway vai reiniciar automaticamente
-    }, 1000);
+
+    const cliente = await queries.createCliente(nome, email, telefone, contextoArquivo);
+    res.status(201).json(cliente);
   } catch (error) {
+    console.error('[API] Erro ao criar cliente:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`[API] Rodando na porta ${PORT}`);
-  console.log(`[API] QR Code: http://localhost:${PORT}/qr`);
-  console.log(`[API] Provider: Groq (Free)`);
-  console.log(`[API] Modelo: ${GROQ_MODEL}`);
-  console.log(`[API] Library: Baileys (lightweight)`);
+// Listar todos os clientes
+app.get('/clientes', async (req, res) => {
+  try {
+    const apenasAtivos = req.query.ativos !== 'false';
+    const clientes = await queries.getAllClientes(apenasAtivos);
+    res.json(clientes);
+  } catch (error) {
+    console.error('[API] Erro ao listar clientes:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Buscar cliente por ID
+app.get('/clientes/:id', async (req, res) => {
+  try {
+    const cliente = await queries.getClienteById(req.params.id);
+    if (!cliente) {
+      return res.status(404).json({ error: 'Cliente não encontrado' });
+    }
+    res.json(cliente);
+  } catch (error) {
+    console.error('[API] Erro ao buscar cliente:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Atualizar contexto do cliente
+app.put('/clientes/:id/contexto', async (req, res) => {
+  try {
+    const { contextoArquivo } = req.body;
+    if (!contextoArquivo) {
+      return res.status(400).json({ error: 'contextoArquivo é obrigatório' });
+    }
+
+    const cliente = await queries.updateClienteContexto(req.params.id, contextoArquivo);
+    if (!cliente) {
+      return res.status(404).json({ error: 'Cliente não encontrado' });
+    }
+
+    // Atualizar contexto nas sessões ativas deste cliente
+    activeSessions.forEach((session) => {
+      if (session.clienteId === parseInt(req.params.id)) {
+        session.contexto = contextoArquivo;
+        console.log(`[CONTEXTO] Atualizado para sessão ${session.sessionName}`);
+      }
+    });
+
+    res.json(cliente);
+  } catch (error) {
+    console.error('[API] Erro ao atualizar contexto:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Atualizar dados do cliente
+app.put('/clientes/:id', async (req, res) => {
+  try {
+    const { nome, email, telefone, ativo } = req.body;
+    const cliente = await queries.updateCliente(req.params.id, { nome, email, telefone, ativo });
+
+    if (!cliente) {
+      return res.status(404).json({ error: 'Cliente não encontrado' });
+    }
+
+    res.json(cliente);
+  } catch (error) {
+    console.error('[API] Erro ao atualizar cliente:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Deletar cliente (soft delete)
+app.delete('/clientes/:id', async (req, res) => {
+  try {
+    const cliente = await queries.deleteCliente(req.params.id);
+    if (!cliente) {
+      return res.status(404).json({ error: 'Cliente não encontrado' });
+    }
+
+    // Desconectar todas as sessões deste cliente
+    const sessoes = await queries.getSessoesByCliente(req.params.id);
+    for (const sessao of sessoes) {
+      await destroySession(sessao.session_name);
+    }
+
+    res.json({ message: 'Cliente desativado com sucesso', cliente });
+  } catch (error) {
+    console.error('[API] Erro ao deletar cliente:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Listar sessões de um cliente
+app.get('/clientes/:id/sessoes', async (req, res) => {
+  try {
+    const sessoes = await queries.getSessoesByCliente(req.params.id);
+    res.json(sessoes);
+  } catch (error) {
+    console.error('[API] Erro ao listar sessões:', error.message);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ----------------------
-// FUNÇÃO IA COM GROQ
+// ROTAS CRUD - SESSÕES
 // ----------------------
-async function gerarRespostaIA(perguntaDoUsuario) {
+
+// Criar nova sessão e iniciar bot
+app.post('/sessoes', async (req, res) => {
   try {
-    const systemPrompt =
+    const { clienteId, whatsappNumero } = req.body;
+
+    if (!clienteId || !whatsappNumero) {
+      return res.status(400).json({ error: 'clienteId e whatsappNumero são obrigatórios' });
+    }
+
+    // Verificar se cliente existe e está ativo
+    const cliente = await queries.getClienteById(clienteId);
+    if (!cliente) {
+      return res.status(404).json({ error: 'Cliente não encontrado' });
+    }
+    if (!cliente.ativo) {
+      return res.status(400).json({ error: 'Cliente inativo' });
+    }
+
+    // Gerar session_name único
+    const sessionName = `session_${whatsappNumero}_${Date.now()}`;
+
+    // Criar sessão no banco
+    const sessao = await queries.createSessao(clienteId, whatsappNumero, sessionName);
+
+    // Inicializar sessão do WhatsApp
+    await initializeSession(sessao.id);
+
+    res.status(201).json(sessao);
+  } catch (error) {
+    console.error('[API] Erro ao criar sessão:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Listar todas as sessões
+app.get('/sessoes', async (req, res) => {
+  try {
+    const { status } = req.query;
+    let sessoes;
+
+    if (status) {
+      sessoes = await queries.getSessoesByStatus(status);
+    } else {
+      // Buscar todas (implementar query se necessário)
+      const allStatuses = ['conectado', 'desconectado', 'aguardando_qr'];
+      sessoes = [];
+      for (const st of allStatuses) {
+        const s = await queries.getSessoesByStatus(st);
+        sessoes.push(...s);
+      }
+    }
+
+    res.json(sessoes);
+  } catch (error) {
+    console.error('[API] Erro ao listar sessões:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Buscar sessão por ID
+app.get('/sessoes/:id', async (req, res) => {
+  try {
+    const sessao = await queries.getSessaoById(req.params.id);
+    if (!sessao) {
+      return res.status(404).json({ error: 'Sessão não encontrada' });
+    }
+    res.json(sessao);
+  } catch (error) {
+    console.error('[API] Erro ao buscar sessão:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Obter QR Code de uma sessão
+app.get('/sessoes/:id/qr', async (req, res) => {
+  try {
+    const sessao = await queries.getSessaoById(req.params.id);
+    if (!sessao) {
+      return res.status(404).json({ error: 'Sessão não encontrada' });
+    }
+
+    if (sessao.status === 'conectado') {
+      return res.json({ message: 'Sessão já conectada', connected: true });
+    }
+
+    if (!sessao.qr_code) {
+      return res.status(404).json({ error: 'QR Code não disponível' });
+    }
+
+    res.json({ qr: sessao.qr_code, status: sessao.status });
+  } catch (error) {
+    console.error('[API] Erro ao buscar QR:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Deletar sessão
+app.delete('/sessoes/:id', async (req, res) => {
+  try {
+    const sessao = await queries.getSessaoById(req.params.id);
+    if (!sessao) {
+      return res.status(404).json({ error: 'Sessão não encontrada' });
+    }
+
+    // Desconectar sessão ativa
+    await destroySession(sessao.session_name);
+
+    // Deletar do banco
+    await queries.deleteSessao(req.params.id);
+
+    res.json({ message: 'Sessão deletada com sucesso' });
+  } catch (error) {
+    console.error('[API] Erro ao deletar sessão:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ----------------------
+// ROTAS - LOGS
+// ----------------------
+
+// Buscar logs de uma sessão
+app.get('/sessoes/:id/logs', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 100;
+    const logs = await queries.getLogsBySessao(req.params.id, limit);
+    res.json(logs);
+  } catch (error) {
+    console.error('[API] Erro ao buscar logs:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ----------------------
+// FUNÇÃO IA COM GROQ (COM CONTEXTO DO BANCO)
+// ----------------------
+async function gerarRespostaIA(perguntaDoUsuario, contextoCliente) {
+  try {
+    const systemPrompt = contextoCliente ||
       "Você é um assistente virtual brasileiro simpático e prestativo. " +
       "Responda de forma clara, direta e natural, como se estivesse conversando pelo WhatsApp. " +
       "Use português brasileiro, seja objetivo e evite respostas muito longas.";
 
     console.log('[GROQ] Consultando Groq AI...');
-    
+
     const response = await groq.chat.completions.create({
       model: GROQ_MODEL,
       messages: [
@@ -110,253 +348,328 @@ async function gerarRespostaIA(perguntaDoUsuario) {
       top_p: 0.9,
     });
 
-    const content = response?.choices?.[0]?.message?.content || 
-                    "Desculpe, não consegui gerar uma resposta agora.";
-    
+    const content = response?.choices?.[0]?.message?.content ||
+      "Desculpe, não consegui gerar uma resposta agora.";
+
     return content.replace(/[*_`#<>~]/g, '').trim();
-      
+
   } catch (error) {
     console.error('[ERROR] Erro ao chamar Groq:', error.message);
-    
+
     if (error.status === 429) {
       return "Desculpe, estou recebendo muitas mensagens. Aguarde alguns segundos.";
     }
-    
+
     if (error.status === 401) {
       console.error('[ERROR] GROQ_API_KEY inválida');
       return "Erro de configuração.";
     }
-    
+
     return "Desculpe, estou com problemas técnicos no momento.";
   }
 }
 
 // ----------------------
-// INICIAR BOT WHATSAPP (BAILEYS)
+// MULTI-SESSÃO: INICIALIZAR SESSÃO DO WHATSAPP
 // ----------------------
-async function connectToWhatsApp() {
-  console.log('[DEBUG] ========================================');
-  console.log('[DEBUG] Iniciando função connectToWhatsApp()');
-  console.log('[DEBUG] ========================================');
+async function initializeSession(sessaoId) {
+  try {
+    console.log(`[INIT] Inicializando sessão ID: ${sessaoId}`);
 
-  const authFolder = './tokens';
-
-  // Criar pasta de autenticação se não existir
-  if (!fs.existsSync(authFolder)) {
-    console.log('[DEBUG] Pasta tokens não existe, criando...');
-    fs.mkdirSync(authFolder, { recursive: true });
-    console.log('[DEBUG] Pasta tokens criada');
-  } else {
-    console.log('[DEBUG] Pasta tokens já existe');
-    const files = fs.readdirSync(authFolder);
-    console.log('[DEBUG] Arquivos em tokens:', files.length > 0 ? files : 'nenhum');
-  }
-
-  console.log('[DEBUG] Carregando auth state...');
-  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
-  console.log('[DEBUG] Auth state carregado');
-
-  // Verificar se há credenciais mas podem estar corrompidas/expiradas
-  const hasCredentials = state.creds?.registered;
-  if (hasCredentials) {
-    console.log('[DEBUG] ✓ Credenciais encontradas - tentando reconectar sessão existente');
-  } else {
-    console.log('[DEBUG] ℹ️  Nenhuma credencial válida - será gerado novo QR Code');
-  }
-
-  // Buscar versão mais recente do WhatsApp Web
-  console.log('[DEBUG] Buscando versão mais recente do WhatsApp Web...');
-  const { version, isLatest } = await fetchLatestBaileysVersion();
-  console.log('[DEBUG] Versão do WA Web:', version.join('.'), '- Latest:', isLatest);
-
-  console.log('[DEBUG] Criando socket do WhatsApp...');
-  console.log('[DEBUG] Auth state:', state.creds ? 'Credenciais existentes' : 'Sem credenciais');
-
-  sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: false,
-    logger: pino({ level: 'silent' }), // Voltando para silent para reduzir ruído
-    // Usar a versão oficial mais recente
-    version,
-    // Configuração de browser mais realista e atualizada
-    browser: ['Chrome (Linux)', 'Chrome', '121.0.0.0'],
-    // Timeouts mais generosos
-    defaultQueryTimeoutMs: 60000,
-    connectTimeoutMs: 60000,
-    qrTimeout: 60000,
-    // Configurações otimizadas
-    syncFullHistory: false,
-    markOnlineOnConnect: false, // Mudado para false para ser mais discreto
-    generateHighQualityLinkPreview: false,
-    // Retry mais robusto
-    retryRequestDelayMs: 250,
-    maxMsgRetryCount: 5,
-    // getMessage obrigatório
-    getMessage: async () => undefined,
-  });
-
-  console.log('[DEBUG] Socket criado com sucesso');
-
-  // Evento: QR Code
-  sock.ev.on('connection.update', (update) => {
-    console.log('[DEBUG] Connection update recebido:', JSON.stringify({
-      connection: update.connection,
-      hasQR: !!update.qr,
-      hasError: !!update.lastDisconnect?.error,
-      errorMessage: update.lastDisconnect?.error?.message,
-      statusCode: update.lastDisconnect?.error?.output?.statusCode,
-      timestamp: new Date().toISOString()
-    }, null, 2));
-
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      qrCodeData = qr;
-      console.log('[QR] ✓ QR Code gerado - acesse /qr para visualizar');
-      console.log('[QR] URL: http://localhost:' + PORT + '/qr');
-    }
-
-    // Ignorar updates sem status de conexão (apenas QR updates)
-    if (!connection && qr) {
+    // Buscar dados da sessão no banco
+    const sessaoData = await queries.getSessaoById(sessaoId);
+    if (!sessaoData) {
+      console.error(`[INIT] Sessão ${sessaoId} não encontrada no banco`);
       return;
     }
 
-    if (connection === 'close') {
-      isConnected = false;
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+    if (!sessaoData.cliente_ativo) {
+      console.error(`[INIT] Cliente da sessão ${sessaoId} está inativo`);
+      return;
+    }
 
-      console.log('[STATUS] ✗ Conexão fechada.');
+    const { session_name, whatsapp_numero, contexto_arquivo, cliente_id, cliente_nome } = sessaoData;
 
-      if (lastDisconnect?.error) {
-        console.log('[ERROR] Detalhes do erro:');
-        console.log('[ERROR] - Mensagem:', lastDisconnect.error.message);
-        console.log('[ERROR] - Status Code:', statusCode);
-        console.log('[ERROR] - Stack:', lastDisconnect.error.stack?.split('\n').slice(0, 3).join('\n'));
+    console.log(`[INIT] Session: ${session_name}, Cliente: ${cliente_nome}`);
 
-        const reasonName = Object.keys(DisconnectReason).find(
-          key => DisconnectReason[key] === statusCode
-        );
-        console.log('[ERROR] - DisconnectReason:', reasonName || 'unknown');
+    // Pasta de autenticação única para esta sessão
+    const authFolder = `./tokens/${session_name}`;
+    if (!fs.existsSync(authFolder)) {
+      fs.mkdirSync(authFolder, { recursive: true });
+      console.log(`[INIT] Pasta de tokens criada: ${authFolder}`);
+    }
+
+    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+
+    console.log(`[INIT] Versão WA Web: ${version.join('.')} (Latest: ${isLatest})`);
+
+    // Criar socket do Baileys
+    const sock = makeWASocket({
+      auth: state,
+      printQRInTerminal: false,
+      logger: pino({ level: 'silent' }),
+      version,
+      browser: ['Chrome (Linux)', 'Chrome', '121.0.0.0'],
+      defaultQueryTimeoutMs: 60000,
+      connectTimeoutMs: 60000,
+      qrTimeout: 60000,
+      syncFullHistory: false,
+      markOnlineOnConnect: false,
+      generateHighQualityLinkPreview: false,
+      retryRequestDelayMs: 250,
+      maxMsgRetryCount: 5,
+      getMessage: async () => undefined,
+    });
+
+    // Armazenar sessão no Map
+    activeSessions.set(session_name, {
+      sock,
+      sessaoId,
+      clienteId: cliente_id,
+      whatsappNumero: whatsapp_numero,
+      contexto: contexto_arquivo,
+      sessionName: session_name,
+      clienteNome: cliente_nome,
+      connected: false
+    });
+
+    console.log(`[INIT] Sessão ${session_name} adicionada ao Map de sessões ativas`);
+
+    // ----------------------
+    // EVENTOS BAILEYS
+    // ----------------------
+
+    // Evento: Connection Update
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        console.log(`[QR] QR Code gerado para ${session_name}`);
+        await queries.updateSessaoQRCode(session_name, qr);
+        await queries.updateSessaoStatus(sessaoId, 'aguardando_qr');
       }
 
-      // Se a sessão expirou ou foi desconectada (401 ou loggedOut)
-      if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-        console.log('[STATUS] ⚠️  Sessão expirada/desconectada. Limpando tokens...');
+      if (connection === 'close') {
+        const session = activeSessions.get(session_name);
+        if (session) session.connected = false;
 
-        // Limpar pasta tokens
-        try {
-          if (fs.existsSync(authFolder)) {
-            const files = fs.readdirSync(authFolder);
-            files.forEach(file => {
-              fs.unlinkSync(`${authFolder}/${file}`);
-            });
-            console.log('[STATUS] ✓ Tokens limpos com sucesso');
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+        console.log(`[STATUS] Conexão fechada: ${session_name}`);
+
+        await queries.updateSessaoStatus(sessaoId, 'desconectado', null);
+
+        if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+          console.log(`[STATUS] Sessão ${session_name} expirada. Limpando tokens...`);
+
+          try {
+            if (fs.existsSync(authFolder)) {
+              fs.rmSync(authFolder, { recursive: true, force: true });
+              console.log(`[STATUS] Tokens limpos: ${authFolder}`);
+            }
+          } catch (error) {
+            console.error(`[ERROR] Erro ao limpar tokens: ${error.message}`);
           }
-        } catch (error) {
-          console.error('[ERROR] Erro ao limpar tokens:', error.message);
+
+          setTimeout(() => {
+            initializeSession(sessaoId);
+          }, 3000);
+        } else if (shouldReconnect) {
+          console.log(`[STATUS] Reconectando ${session_name} em 5 segundos...`);
+          setTimeout(() => {
+            initializeSession(sessaoId);
+          }, 5000);
         }
+      } else if (connection === 'open') {
+        const session = activeSessions.get(session_name);
+        if (session) session.connected = true;
 
-        // Aguardar e reconectar para gerar novo QR
-        console.log('[STATUS] ⟳ Gerando novo QR Code em 3 segundos...');
-        setTimeout(() => {
-          connectToWhatsApp();
-        }, 3000);
-      } else if (shouldReconnect) {
-        console.log('[STATUS] ⟳ Tentando reconectar em 5 segundos...');
-        setTimeout(() => {
-          connectToWhatsApp();
-        }, 5000);
-      } else {
-        console.log('[STATUS] ⚠️  Conexão encerrada permanentemente.');
+        console.log(`[STATUS] ✓ Sessão ${session_name} conectada!`);
+        await queries.updateSessaoStatus(sessaoId, 'conectado', null);
+      } else if (connection === 'connecting') {
+        console.log(`[STATUS] Conectando ${session_name}...`);
       }
-    } else if (connection === 'open') {
-      isConnected = true;
-      qrCodeData = null;
-      console.log('[STATUS] ✓ Bot conectado com sucesso ao WhatsApp!');
-    } else if (connection === 'connecting') {
-      console.log('[STATUS] ⟳ Conectando ao WhatsApp...');
-    } else {
-      console.log('[DEBUG] Status desconhecido:', connection);
-    }
-  });
+    });
 
-  // Salvar credenciais quando atualizadas
-  sock.ev.on('creds.update', async () => {
-    console.log('[DEBUG] Credenciais atualizadas - salvando...');
-    await saveCreds();
-    console.log('[DEBUG] Credenciais salvas com sucesso');
-  });
+    // Evento: Credenciais Atualizadas
+    sock.ev.on('creds.update', async () => {
+      await saveCreds();
+    });
 
-  // Evento: Mensagens
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+    // Evento: Mensagens Recebidas
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify') return;
 
-    for (const msg of messages) {
-      // Ignorar mensagens próprias e de grupos
-      if (msg.key.fromMe || msg.key.remoteJid.includes('@g.us')) continue;
+      const session = activeSessions.get(session_name);
+      if (!session) return;
 
-      const text = msg.message?.conversation || 
-                   msg.message?.extendedTextMessage?.text || '';
+      for (const msg of messages) {
+        // Ignorar mensagens próprias e de grupos
+        if (msg.key.fromMe || msg.key.remoteJid.includes('@g.us')) continue;
 
-      if (!text.trim()) continue;
+        const text = msg.message?.conversation ||
+          msg.message?.extendedTextMessage?.text || '';
 
-      const sender = msg.key.remoteJid;
+        if (!text.trim()) continue;
 
-      console.log(`\n[MESSAGE] Mensagem de ${sender}:`);
-      console.log(`[MESSAGE] "${text}"`);
+        const sender = msg.key.remoteJid;
 
-      try {
-        // Indicador de digitação
-        await sock.sendPresenceUpdate('composing', sender);
+        console.log(`\n[MESSAGE] [${session_name}] De ${sender}:`);
+        console.log(`[MESSAGE] "${text}"`);
 
-        // Gerar resposta IA
-        const startTime = Date.now();
-        const respostaIA = await gerarRespostaIA(text);
-        const responseTime = Date.now() - startTime;
-
-        console.log(`[RESPONSE] Resposta gerada em ${responseTime}ms:`);
-        console.log(`[RESPONSE] "${respostaIA.substring(0, 100)}${respostaIA.length > 100 ? '...' : ''}"`);
-
-        // Enviar resposta
-        await sock.sendMessage(sender, { text: respostaIA });
-        console.log(`[SENT] Mensagem enviada\n`);
-
-        // Parar indicador de digitação
-        await sock.sendPresenceUpdate('paused', sender);
-
-      } catch (error) {
-        console.error('[ERROR] Erro ao processar mensagem:', error.message);
-        
         try {
-          await sock.sendMessage(sender, { 
-            text: 'Desculpe, ocorreu um erro. Tente novamente.' 
-          });
-        } catch (sendError) {
-          console.error('[ERROR] Não foi possível enviar mensagem de erro');
+          // Log mensagem recebida
+          await queries.logMensagem(sessaoId, sender, text, 'recebida');
+
+          // Indicador de digitação
+          await sock.sendPresenceUpdate('composing', sender);
+
+          // Gerar resposta IA com contexto do banco
+          const startTime = Date.now();
+          const respostaIA = await gerarRespostaIA(text, session.contexto);
+          const responseTime = Date.now() - startTime;
+
+          console.log(`[RESPONSE] [${session_name}] Resposta em ${responseTime}ms`);
+          console.log(`[RESPONSE] "${respostaIA.substring(0, 100)}..."`);
+
+          // Enviar resposta
+          await sock.sendMessage(sender, { text: respostaIA });
+
+          // Log mensagem enviada
+          await queries.logMensagem(sessaoId, sender, respostaIA, 'enviada', responseTime);
+
+          console.log(`[SENT] [${session_name}] Mensagem enviada\n`);
+
+          // Parar indicador de digitação
+          await sock.sendPresenceUpdate('paused', sender);
+
+        } catch (error) {
+          console.error(`[ERROR] [${session_name}] Erro ao processar mensagem:`, error.message);
+
+          try {
+            await sock.sendMessage(sender, {
+              text: 'Desculpe, ocorreu um erro. Tente novamente.'
+            });
+          } catch (sendError) {
+            console.error(`[ERROR] [${session_name}] Não foi possível enviar mensagem de erro`);
+          }
         }
       }
+    });
+
+    console.log(`[INIT] ✓ Sessão ${session_name} inicializada com sucesso`);
+
+  } catch (error) {
+    console.error(`[INIT] Erro ao inicializar sessão ${sessaoId}:`, error.message);
+  }
+}
+
+// ----------------------
+// MULTI-SESSÃO: DESTRUIR SESSÃO
+// ----------------------
+async function destroySession(sessionName) {
+  try {
+    const session = activeSessions.get(sessionName);
+    if (!session) {
+      console.log(`[DESTROY] Sessão ${sessionName} não encontrada no Map`);
+      return;
     }
+
+    console.log(`[DESTROY] Encerrando sessão ${sessionName}...`);
+
+    // Fazer logout do Baileys
+    if (session.sock) {
+      try {
+        await session.sock.logout();
+      } catch (error) {
+        console.error(`[DESTROY] Erro ao fazer logout: ${error.message}`);
+      }
+    }
+
+    // Remover do Map
+    activeSessions.delete(sessionName);
+
+    // Atualizar status no banco
+    const sessaoData = await queries.getSessaoBySessionName(sessionName);
+    if (sessaoData) {
+      await queries.updateSessaoStatus(sessaoData.id, 'desconectado', null);
+    }
+
+    console.log(`[DESTROY] ✓ Sessão ${sessionName} encerrada`);
+  } catch (error) {
+    console.error(`[DESTROY] Erro ao destruir sessão ${sessionName}:`, error.message);
+  }
+}
+
+// ----------------------
+// INICIALIZAÇÃO DO SISTEMA
+// ----------------------
+async function startBot() {
+  console.log('[BOT] Iniciando sistema multi-sessão...');
+
+  // 1. Testar conexão com PostgreSQL
+  console.log('[BOT] Testando conexão com PostgreSQL...');
+  const dbConnected = await db.testConnection();
+  if (!dbConnected) {
+    console.error('[BOT] ✗ Falha ao conectar ao banco de dados. Verifique DATABASE_URL');
+    process.exit(1);
+  }
+
+  // 2. Carregar sessões ativas do banco
+  console.log('[BOT] Carregando sessões ativas...');
+  try {
+    const sessoesAtivas = await queries.getSessoesByStatus('conectado');
+    console.log(`[BOT] Encontradas ${sessoesAtivas.length} sessões previamente conectadas`);
+
+    // Inicializar cada sessão
+    for (const sessao of sessoesAtivas) {
+      console.log(`[BOT] Inicializando sessão: ${sessao.session_name}`);
+      await initializeSession(sessao.id);
+    }
+  } catch (error) {
+    console.error('[BOT] Erro ao carregar sessões:', error.message);
+  }
+
+  // 3. Iniciar API Express
+  app.listen(PORT, () => {
+    console.log(`[API] ✓ Servidor rodando na porta ${PORT}`);
+    console.log(`[API] Provider: Groq (${GROQ_MODEL})`);
+    console.log(`[API] Library: Baileys (Multi-Sessão)`);
+    console.log(`[API] Database: PostgreSQL`);
+    console.log(`[API] Sessões ativas: ${activeSessions.size}`);
   });
 }
 
-// Iniciar conexão
-console.log('[BOT] Iniciando bot WhatsApp com Baileys...');
-connectToWhatsApp();
+// Iniciar sistema
+startBot();
 
-// Graceful shutdown
+// ----------------------
+// GRACEFUL SHUTDOWN
+// ----------------------
 process.on('SIGINT', async () => {
-  console.log('\n[SHUTDOWN] Encerrando bot...');
-  if (sock) {
-    await sock.logout();
+  console.log('\n[SHUTDOWN] Encerrando sistema...');
+
+  // Encerrar todas as sessões
+  for (const [sessionName] of activeSessions) {
+    await destroySession(sessionName);
   }
+
+  // Fechar pool do banco
+  await db.close();
+
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('\n[SHUTDOWN] Recebido SIGTERM, encerrando...');
-  if (sock) {
-    await sock.logout();
+
+  for (const [sessionName] of activeSessions) {
+    await destroySession(sessionName);
   }
+
+  await db.close();
+
   process.exit(0);
 });
