@@ -5,7 +5,6 @@ Ao receber uma mensagem de texto, o bot gera uma resposta com IA, converte para 
 
 ---
 
-API-KEY Groq = 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
 
 ## 1. Pré-requisitos
 
