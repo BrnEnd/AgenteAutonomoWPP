@@ -73,10 +73,10 @@ app.post('/test-ai', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 API rodando na porta ${PORT}`);
-  console.log(`📱 QR Code: http://localhost:${PORT}/qr`);
-  console.log(`🤖 Provider: Groq (Free)`);
-  console.log(`🧠 Modelo: ${GROQ_MODEL}`);
+      console.log(`[API] Rodando na porta ${PORT}`);
+  console.log(`[API] QR Code: http://localhost:${PORT}/qr`);
+  console.log(`[API] Provider: Groq (Free)`);
+  console.log(`[API] Modelo: ${GROQ_MODEL}`);
 });
 
 // ----------------------
@@ -90,7 +90,7 @@ async function gerarRespostaIA(perguntaDoUsuario) {
       "Use português brasileiro, seja objetivo e evite respostas muito longas. " +
       "Não use formatações especiais, símbolos ou emojis em excesso.";
 
-    console.log('🤖 Consultando Groq AI...');
+    console.log('Consultando Groq AI...');
     
     const response = await groq.chat.completions.create({
       model: GROQ_MODEL,
@@ -114,7 +114,7 @@ async function gerarRespostaIA(perguntaDoUsuario) {
       .trim();
       
   } catch (error) {
-    console.error('❌ Erro ao chamar Groq:', error.message);
+    console.error('Erro ao chamar Groq:', error.message);
     
     // Tratamento de erros específicos
     if (error.status === 429) {
@@ -122,7 +122,7 @@ async function gerarRespostaIA(perguntaDoUsuario) {
     }
     
     if (error.status === 401) {
-      console.error('⚠️ GROQ_API_KEY inválida! Configure no .env');
+      console.error('GROQ_API_KEY inválida! Configure no .env');
       return "Erro de configuração. Por favor, contate o administrador.";
     }
     
@@ -133,7 +133,7 @@ async function gerarRespostaIA(perguntaDoUsuario) {
 // ----------------------
 // INICIAR BOT WHATSAPP
 // ----------------------
-console.log('🤖 Iniciando bot WhatsApp com Groq AI...');
+console.log('Iniciando bot WhatsApp com Groq AI...');
 
 wppconnect.create({
   session: 'groq_bot',
@@ -143,34 +143,34 @@ wppconnect.create({
   logQR: false,
   
   statusFind: (statusSession, session) => {
-    console.log(`📊 Status: ${statusSession}`);
+    console.log(`Status: ${statusSession}`);
     
     if (statusSession === 'qrReadSuccess') {
       isConnected = true;
       qrCodeData = null;
-      console.log('✅ QR Code escaneado com sucesso!');
+      console.log('QR Code escaneado com sucesso!');
     }
     
     if (statusSession === 'isLogged') {
       isConnected = true;
-      console.log('✅ Bot conectado e pronto!');
+      console.log('Bot conectado e pronto!');
     }
     
     if (statusSession === 'notLogged') {
       isConnected = false;
-      console.log('⚠️ Aguardando login...');
+      console.log('Aguardando login...');
     }
   },
   
   catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
-    console.log(`📱 QR Code gerado (tentativa ${attempts}/${5})`);
+    console.log(`QR Code gerado (tentativa ${attempts}/${5})`);
     qrCodeData = base64Qr;
   },
   
 }).then(client => {
   clientInstance = client;
   isConnected = true;
-  console.log('✅ Bot iniciado e aguardando mensagens...');
+  console.log('Bot iniciado e aguardando mensagens...');
 
   // Listener de mensagens
   client.onMessage(async message => {
@@ -180,7 +180,7 @@ wppconnect.create({
         const textoRecebido = message.body?.trim() || '';
         if (!textoRecebido) return;
 
-        console.log(`\n📩 Mensagem de ${message.from}:`);
+        console.log(`\nMensagem de ${message.from}:`);
         console.log(`   "${textoRecebido}"`);
 
         // Indicador de digitação
@@ -191,18 +191,18 @@ wppconnect.create({
         const respostaIA = await gerarRespostaIA(textoRecebido);
         const responseTime = Date.now() - startTime;
         
-        console.log(`🤖 Resposta gerada em ${responseTime}ms:`);
+        console.log(`Resposta gerada em ${responseTime}ms:`);
         console.log(`   "${respostaIA.substring(0, 100)}${respostaIA.length > 100 ? '...' : ''}"`);
 
         // Enviar resposta
         await client.sendText(message.from, respostaIA);
-        console.log(`✅ Mensagem enviada!\n`);
+        console.log(`Mensagem enviada!\n`);
 
         // Parar indicador de digitação
         await client.stopTyping(message.from);
       }
     } catch (err) {
-      console.error('❌ Erro ao processar mensagem:', err?.message || err);
+      console.error('Erro ao processar mensagem:', err?.message || err);
       
       // Tentar enviar mensagem de erro ao usuário
       try {
@@ -211,18 +211,18 @@ wppconnect.create({
           'Desculpe, ocorreu um erro ao processar sua mensagem. Tente novamente.'
         );
       } catch (sendError) {
-        console.error('❌ Não foi possível enviar mensagem de erro');
+        console.error(' Não foi possível enviar mensagem de erro');
       }
     }
   });
 
   // Listener de estado da conexão
   client.onStateChange(state => {
-    console.log(`🔄 Estado alterado: ${state}`);
+    console.log(`Estado alterado: ${state}`);
     
     if (state === 'CONFLICT' || state === 'UNLAUNCHED') {
       isConnected = false;
-      console.log('⚠️ Conexão perdida. Tentando reconectar...');
+      console.log('Conexão perdida. Tentando reconectar...');
       client.useHere();
     }
   });
@@ -230,8 +230,8 @@ wppconnect.create({
   // Listener de ACK (confirmação de leitura)
   client.onAck(ack => {
     const status = {
-      '-1': '❌ Erro',
-      '0': '⏳ Aguardando',
+      '-1': 'Erro',
+      '0': 'Aguardando',
       '1': '✓ Enviado',
       '2': '✓✓ Recebido',
       '3': '✓✓ Lido'
@@ -240,13 +240,13 @@ wppconnect.create({
   });
 
 }).catch(error => {
-  console.error('❌ Falha ao iniciar o bot:', error?.message || error);
+  console.error('Falha ao iniciar o bot:', error?.message || error);
   process.exit(1);
 });
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-  console.log('\n🛑 Encerrando bot gracefully...');
+  console.log('\nEncerrando bot gracefully...');
   if (clientInstance) {
     await clientInstance.close();
   }
@@ -254,7 +254,7 @@ process.on('SIGINT', async () => {
 });
 
 process.on('SIGTERM', async () => {
-  console.log('\n🛑 Recebido SIGTERM, encerrando...');
+  console.log('\n Recebido SIGTERM, encerrando...');
   if (clientInstance) {
     await clientInstance.close();
   }
