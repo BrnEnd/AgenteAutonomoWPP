@@ -4,9 +4,7 @@
   "description": "Bot WhatsApp com Groq AI",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js",
-    "build": "npx puppeteer browsers install chrome"
+    "start": "node index.js"
   },
   "dependencies": {
     "@wppconnect-team/wppconnect": "^1.37.5",
@@ -17,11 +15,7 @@
     "openai": "^6.8.1",
     "path": "^0.12.7"
   },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
-  },
   "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=9.0.0"
+    "node": ">=18.0.0"
   }
 }
