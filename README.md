@@ -1,117 +1,123 @@
-# Bot de Voz com Azure OpenAI e WppConnect
+# Agente Autônomo WhatsApp
 
-Este projeto integra o **Azure OpenAI** e o **Azure Text-to-Speech (TTS)** com o **WppConnect**, criando um assistente de voz automático para WhatsApp.  
-Ao receber uma mensagem de texto, o bot gera uma resposta com IA, converte para áudio e envia de volta como mensagem de voz (PTT).
+Bot de WhatsApp construído com [Baileys](https://github.com/WhiskeySockets/Baileys) e Groq que suporta múltiplas sessões simultâneas.
+Cada sessão mantém seu próprio contexto opcional (documentos de instruções para a LLM) e persiste metadados, histórico de mensagens e eventos no Supabase.
 
----
+## Principais funcionalidades
 
+- ✅ **Múltiplas sessões**: cada sessão utiliza uma pasta dedicada em `./tokens/<sessionId>` para armazenar credenciais do WhatsApp Web.
+- ✅ **Contexto customizável**: ao criar uma sessão é possível enviar um campo `context` para personalizar as respostas da IA.
+- ✅ **Persistência no Supabase**: sessões, mensagens e eventos são gravados em tabelas próprias, permitindo auditoria completa.
+- ✅ **Restauração automática**: sessões marcadas como `auto_restart` são reativadas quando o servidor reinicia.
+- ✅ **API REST** para criação, consulta, envio de mensagens e encerramento de sessões.
+- ✅ **QR Code no terminal** graças ao [`qrcode-terminal`](https://github.com/gtanner/qrcode-terminal), mantendo o fluxo de pareamento tradicional do Baileys.
 
-## 1. Pré-requisitos
+## Requisitos
 
-Antes de iniciar, verifique se o ambiente atende aos seguintes requisitos:
+- Node.js 20 ou superior
+- Conta Supabase (PostgreSQL) com acesso ao banco de dados
+- Chave da API da Groq (`GROQ_API_KEY`)
 
-- **Node.js 18 ou superior**
-- **Google Chrome ou Chromium** instalado (utilizado pelo WppConnect)
+## Variáveis de ambiente
 
+Crie um arquivo `.env` na raiz do projeto contendo:
 
----
+```env
+PORT=3000
+LOG_LEVEL=info
+SESSION_LOG_LEVEL=info
+TOKENS_PATH=./tokens
 
-## 2. Instalar dependências
+GROQ_API_KEY=sua_chave_groq
+GROQ_MODEL=llama-3.1-8b-instant
 
-Instale as bibliotecas necessárias:
+# Credenciais Supabase
+SUPABASE_URL=https://<sua-instancia>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=sua_chave_service_role
+SUPABASE_DB_URL=postgresql://usuario:senha@host:5432/postgres
+```
+
+- `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` são utilizados pelo SDK oficial para inserções/consultas.
+- `SUPABASE_DB_URL` é usada somente pelo script de migrações para executar SQL diretamente no Postgres.
+
+## Instalação
 
 ```bash
 npm install
 ```
 
-As principais dependências são:
-- `@wppconnect-team/wppconnect` – integração com WhatsApp Web  
-- `axios` – comunicação com as APIs do Azure  
-- `openai` – SDK oficial da Azure OpenAI  
-- `dotenv` – leitura das variáveis de ambiente  
-- `fs-extra` e `path` – manipulação de arquivos e diretórios  
+> Caso esteja em um ambiente sem acesso à internet, execute `npm install` localmente antes de fazer o deploy para garantir que as dependências `@supabase/supabase-js` e `pg` sejam instaladas.
 
----
+## Banco de dados
 
-## 3. Configuração do arquivo `.env`
-
-Crie o arquivo `.env` na raiz do projeto (ou copie o exemplo):
+As tabelas necessárias estão definidas em `supabase/migrations/0001_create_tables.sql`.
+Para aplicar as migrações execute:
 
 ```bash
-cp .env.example .env
+npm run db:migrate
 ```
 
-Preencha as variáveis com as credenciais do Azure:
+Certifique-se de que `SUPABASE_DB_URL` esteja configurada com o connection string do Postgres da sua instância Supabase.
 
-```env
-AZURE_OPENAI_API_KEY=sua_chave_aqui
-AZURE_TTS_API_KEY=sua_chave_aqui
-AZURE_OPENAI_ENDPOINT=https://seuendpoint.openai.azure.com/
-AZURE_REGION=brazilsouth
-DEPLOYMENT_NAME=gpt-4o-mini
-MODEL_NAME=gpt-4o-mini
-API_VERSION=2024-04-01-preview
-SESSION_NAME=voz_bot
-```
+### Tabelas criadas
 
----
+- `sessions`: estado atual de cada sessão do WhatsApp.
+- `messages`: histórico de mensagens recebidas/enviadas por sessão.
+- `events`: log de QR codes, reconexões, erros e outras ocorrências.
 
-## 4. Executar o projeto
-
-Execute o comando abaixo para iniciar o bot:
+## Execução
 
 ```bash
-node index.js
+npm run dev # desenvolvimento com nodemon
+# ou
+npm start
 ```
 
-Ao rodar, o terminal exibirá um **QR Code**.  
-No celular, abra o WhatsApp e escaneie o código.
+Ao iniciar o servidor você pode criar novas sessões através da API REST.
 
-> É recomendável usar um numero de WhatsApp de teste, para evitar que o bot envie mensagens para contatos reais(se conectar no whatsApp de uso pessoal isso irá acontecer para todas as conversar pendentes).
+## Endpoints principais
 
----
+| Método | Rota | Descrição |
+| ------ | ---- | --------- |
+| `POST` | `/sessions` | Cria e inicia uma nova sessão. Body: `{ "sessionId": "suapessoa", "context": "instruções opcionais", "displayName": "Meu Bot", "autoRestart": true }` |
+| `GET` | `/sessions` | Lista todas as sessões carregadas em memória. |
+| `GET` | `/sessions/:id/status` | Consulta o estado de uma sessão específica. |
+| `GET` | `/sessions/:id/qr` | Obtém o último QR Code gerado para a sessão. |
+| `PATCH` | `/sessions/:id` | Atualiza `context`, `displayName` ou `autoRestart`. |
+| `POST` | `/sessions/:id/send` | Envia uma mensagem manual `{ "remoteJid": "5511999999999@s.whatsapp.net", "message": "Olá" }`. |
+| `DELETE` | `/sessions/:id` | Encerra a sessão e opcionalmente remove tokens (`?removeTokens=true`). |
 
-## 5. Como funciona
+Além disso, `GET /health` retorna dados de monitoramento do processo e `GET /status` agrega o estado de todas as sessões.
 
-1. O bot aguarda mensagens recebidas (apenas conversas privadas).  
-2. Ao receber um texto:
-   - Gera uma resposta usando **IA**.  
-   - Converte o texto em áudio com **Azure Text-to-Speech**.  
-   - Envia o áudio como **mensagem de voz (PTT)**.
+## Fluxo de mensagens
 
-O arquivo `resposta.mp3` é sobrescrito a cada nova interação.
+1. Mensagens recebidas (`messages.upsert`) são gravadas no Supabase e encaminhadas para a Groq.
+2. O contexto definido na criação da sessão é concatenado ao prompt do sistema para personalizar respostas.
+3. A resposta da IA é enviada ao usuário, registrada como mensagem de saída e um evento é salvo para auditoria.
 
----
-
-## 7. Interface do WhatsApp
-
-Por padrão, o WppConnect roda em modo **headless**, sem abrir a janela do navegador.
-
-Se quiser visualizar a interface do WhatsApp Web, altere a configuração no `index.js`:
-
-```js
-headless: false,
-```
-
-Isso facilita a depuração e o acompanhamento do comportamento do bot.
-
----
-
-## 8. Estrutura do projeto
+## Estrutura de pastas
 
 ```
-AssistentePorFala/
+.
 ├── index.js
-├── .env
-├── .env.example
-├── package.json
-└── resposta.mp3
+├── src
+│   ├── ai
+│   │   └── groq.js
+│   ├── db
+│   │   ├── repository.js
+│   │   └── supabase.js
+│   └── sessions
+│       └── WhatsAppSession.js
+├── scripts
+│   └── runMigrations.js
+└── supabase
+    └── migrations
+        └── 0001_create_tables.sql
 ```
 
----
+## Próximos passos
 
-## 9. Boas práticas para testes
+- Adicionar políticas de Row Level Security (RLS) no Supabase caso exponha as tabelas via API pública.
+- Criptografar a pasta `tokens` ou utilizar um cofre de segredos para armazenar credenciais sensíveis.
 
-- Use um número separado para testes para não ter respostas indesejadas kkk.    
-
----
+Com essa base você consegue hospedar diversos números do WhatsApp simultaneamente, preservando histórico completo e contexto individual para cada instância do bot.
