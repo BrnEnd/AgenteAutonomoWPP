@@ -57,6 +57,28 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Endpoint para limpar sessão (útil para debug)
+app.post('/reset', async (req, res) => {
+  try {
+    const fs = require('fs');
+    const authFolder = './tokens';
+    
+    if (fs.existsSync(authFolder)) {
+      fs.rmSync(authFolder, { recursive: true, force: true });
+      console.log('[RESET] Sessão limpa com sucesso');
+    }
+    
+    res.json({ success: true, message: 'Sessão limpa. Reinicie o bot.' });
+    
+    // Reiniciar conexão
+    setTimeout(() => {
+      process.exit(0); // Railway vai reiniciar automaticamente
+    }, 1000);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`[API] Rodando na porta ${PORT}`);
   console.log(`[API] QR Code: http://localhost:${PORT}/qr`);
@@ -126,7 +148,12 @@ async function connectToWhatsApp() {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
-    browser: ['Bot', 'Chrome', '1.0.0'],
+    browser: ['WhatsApp Bot', 'Chrome', '1.0.0'],
+    defaultQueryTimeoutMs: undefined,
+    syncFullHistory: false,
+    markOnlineOnConnect: true,
+    generateHighQualityLinkPreview: false,
+    getMessage: async () => undefined,
   });
 
   // Evento: QR Code
@@ -142,15 +169,26 @@ async function connectToWhatsApp() {
       isConnected = false;
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       
-      console.log('[STATUS] Conexão fechada. Reconectando:', shouldReconnect);
+      console.log('[STATUS] Conexão fechada.');
+      
+      if (lastDisconnect?.error) {
+        console.log('[ERROR] Erro:', lastDisconnect.error.message);
+      }
       
       if (shouldReconnect) {
-        connectToWhatsApp();
+        console.log('[STATUS] Tentando reconectar em 5 segundos...');
+        setTimeout(() => {
+          connectToWhatsApp();
+        }, 5000);
+      } else {
+        console.log('[STATUS] Sessão encerrada. Limpe a pasta tokens para gerar novo QR.');
       }
     } else if (connection === 'open') {
       isConnected = true;
       qrCodeData = null;
       console.log('[STATUS] Bot conectado com sucesso');
+    } else if (connection === 'connecting') {
+      console.log('[STATUS] Conectando ao WhatsApp...');
     }
   });
 
