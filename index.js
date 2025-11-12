@@ -230,12 +230,17 @@ app.post('/sessoes', async (req, res) => {
     // Criar sessão no banco
     const sessao = await queries.createSessao(clienteId, whatsappNumero, sessionName);
 
-    // Inicializar sessão do WhatsApp
-    await initializeSession(sessao.id);
+    // Inicializar sessão do WhatsApp (não aguardar conclusão)
+    // QR code será gerado assincronamente via evento
+    initializeSession(sessao.id).catch(error => {
+      console.error(`[API] Erro ao inicializar sessão ${sessao.id}:`, error.message);
+      console.error('[API] Stack:', error.stack);
+    });
 
     res.status(201).json(sessao);
   } catch (error) {
     console.error('[API] Erro ao criar sessão:', error.message);
+    console.error('[API] Stack:', error.stack);
     res.status(500).json({ error: error.message });
   }
 });
@@ -393,12 +398,12 @@ async function initializeSession(sessaoId) {
     // Buscar dados da sessão no banco
     const sessaoData = await queries.getSessaoById(sessaoId);
     if (!sessaoData) {
-      console.error(`[INIT] Sessão ${sessaoId} não encontrada no banco`);
+      console.error(`[INIT] ✗ Sessão ${sessaoId} não encontrada no banco`);
       return;
     }
 
     if (!sessaoData.cliente_ativo) {
-      console.error(`[INIT] Cliente da sessão ${sessaoId} está inativo`);
+      console.error(`[INIT] ✗ Cliente da sessão ${sessaoId} está inativo`);
       return;
     }
 
@@ -408,16 +413,27 @@ async function initializeSession(sessaoId) {
 
     // Pasta de autenticação única para esta sessão
     const authFolder = `./tokens/${session_name}`;
-    if (!fs.existsSync(authFolder)) {
-      fs.mkdirSync(authFolder, { recursive: true });
-      console.log(`[INIT] Pasta de tokens criada: ${authFolder}`);
+    try {
+      if (!fs.existsSync(authFolder)) {
+        fs.mkdirSync(authFolder, { recursive: true });
+        console.log(`[INIT] ✓ Pasta de tokens criada: ${authFolder}`);
+      } else {
+        console.log(`[INIT] ✓ Pasta de tokens já existe: ${authFolder}`);
+      }
+    } catch (fsError) {
+      console.error(`[INIT] ✗ Erro ao criar pasta de tokens:`, fsError.message);
+      throw fsError;
     }
 
+    console.log(`[INIT] Carregando estado de autenticação...`);
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+    console.log(`[INIT] ✓ Estado de autenticação carregado`);
+
+    console.log(`[INIT] Obtendo versão do Baileys...`);
     const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`[INIT] ✓ Versão WA Web: ${version.join('.')} (Latest: ${isLatest})`);
 
-    console.log(`[INIT] Versão WA Web: ${version.join('.')} (Latest: ${isLatest})`);
-
+    console.log(`[INIT] Criando socket Baileys...`);
     // Criar socket do Baileys
     const sock = makeWASocket({
       auth: state,
@@ -436,6 +452,8 @@ async function initializeSession(sessaoId) {
       getMessage: async () => undefined,
     });
 
+    console.log(`[INIT] ✓ Socket Baileys criado com sucesso`);
+
     // Armazenar sessão no Map
     activeSessions.set(session_name, {
       sock,
@@ -448,7 +466,8 @@ async function initializeSession(sessaoId) {
       connected: false
     });
 
-    console.log(`[INIT] Sessão ${session_name} adicionada ao Map de sessões ativas`);
+    console.log(`[INIT] ✓ Sessão ${session_name} adicionada ao Map de sessões ativas`);
+    console.log(`[INIT] ✓ Total de sessões ativas: ${activeSessions.size}`);
 
     // ----------------------
     // EVENTOS BAILEYS
@@ -458,10 +477,23 @@ async function initializeSession(sessaoId) {
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
+      console.log(`[CONNECTION UPDATE] Sessão: ${session_name}, Connection: ${connection}, QR: ${qr ? 'SIM' : 'NÃO'}`);
+
       if (qr) {
-        console.log(`[QR] QR Code gerado para ${session_name}`);
-        await queries.updateSessaoQRCode(session_name, qr);
-        await queries.updateSessaoStatus(sessaoId, 'aguardando_qr');
+        console.log(`[QR] ✓ QR Code gerado para ${session_name}`);
+        console.log(`[QR] Tamanho do QR: ${qr.length} caracteres`);
+
+        try {
+          const result = await queries.updateSessaoQRCode(session_name, qr);
+          console.log(`[QR] ✓ QR Code salvo no banco para sessão ${session_name}`);
+          console.log(`[QR] Resultado do update:`, result ? 'OK' : 'FALHOU');
+
+          await queries.updateSessaoStatus(sessaoId, 'aguardando_qr');
+          console.log(`[QR] ✓ Status atualizado para 'aguardando_qr'`);
+        } catch (qrError) {
+          console.error(`[QR] ✗ Erro ao salvar QR Code:`, qrError.message);
+          console.error(`[QR] Stack:`, qrError.stack);
+        }
       }
 
       if (connection === 'close') {
@@ -576,7 +608,16 @@ async function initializeSession(sessaoId) {
     console.log(`[INIT] ✓ Sessão ${session_name} inicializada com sucesso`);
 
   } catch (error) {
-    console.error(`[INIT] Erro ao inicializar sessão ${sessaoId}:`, error.message);
+    console.error(`[INIT] ✗ Erro ao inicializar sessão ${sessaoId}:`, error.message);
+    console.error(`[INIT] Stack:`, error.stack);
+    console.error(`[INIT] Detalhes completos:`, error);
+
+    // Tentar atualizar status da sessão para erro
+    try {
+      await queries.updateSessaoStatus(sessaoId, 'desconectado', null);
+    } catch (statusError) {
+      console.error(`[INIT] Erro ao atualizar status após falha:`, statusError.message);
+    }
   }
 }
 
