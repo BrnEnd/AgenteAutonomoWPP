@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const express = require('express');
+const cors = require('cors');
 const OpenAI = require('openai');
 const fs = require('fs');
 const pino = require('pino');
@@ -30,6 +31,19 @@ const activeSessions = new Map();
 // EXPRESS API
 // ----------------------
 const app = express();
+
+// Configuração CORS
+const corsOptions = {
+  origin: [
+    'http://localhost:8080',                               // Desenvolvimento local
+    'https://front-agente-autonomo.vercel.app'            // Produção Vercel
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Health check
