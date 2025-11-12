@@ -332,6 +332,75 @@ app.get('/sessoes/:id/qr', async (req, res) => {
   }
 });
 
+// Solicitar código de emparelhamento (pairing code)
+app.post('/sessoes/:id/pairing-code', async (req, res) => {
+  try {
+    const { phoneNumber } = req.body;
+
+    if (!phoneNumber) {
+      return res.status(400).json({ error: 'phoneNumber é obrigatório' });
+    }
+
+    // Validar formato do número (apenas dígitos, sem +)
+    const cleanNumber = phoneNumber.replace(/\D/g, '');
+    if (cleanNumber.length < 10) {
+      return res.status(400).json({
+        error: 'Número inválido',
+        message: 'Formato esperado: 5511999999999 (código país + DDD + número)'
+      });
+    }
+
+    const sessao = await queries.getSessaoById(req.params.id);
+    if (!sessao) {
+      return res.status(404).json({ error: 'Sessão não encontrada' });
+    }
+
+    if (sessao.status === 'conectado') {
+      return res.json({ message: 'Sessão já conectada', connected: true });
+    }
+
+    // Se não tem sessão ativa, inicializar
+    if (!activeSessions.has(sessao.session_name)) {
+      initializeSession(parseInt(req.params.id)).catch(error => {
+        console.error(`[PAIRING] Erro ao inicializar:`, error.message);
+      });
+
+      // Aguardar socket ser criado
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    // Obter sessão ativa
+    const activeSession = activeSessions.get(sessao.session_name);
+    if (!activeSession || !activeSession.sock) {
+      return res.status(503).json({
+        error: 'Sessão não inicializada',
+        message: 'Aguarde alguns segundos e tente novamente'
+      });
+    }
+
+    // Solicitar pairing code
+    try {
+      const code = await activeSession.sock.requestPairingCode(cleanNumber);
+
+      return res.json({
+        pairingCode: code,
+        message: 'Digite este código no WhatsApp em Aparelhos Conectados > Conectar Aparelho',
+        phoneNumber: cleanNumber
+      });
+    } catch (pairingError) {
+      console.error('[PAIRING] Erro ao solicitar código:', pairingError.message);
+      return res.status(500).json({
+        error: 'Erro ao gerar código de emparelhamento',
+        message: pairingError.message
+      });
+    }
+
+  } catch (error) {
+    console.error('[PAIRING] Erro:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Deletar sessão
 app.delete('/sessoes/:id', async (req, res) => {
   try {
