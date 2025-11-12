@@ -515,18 +515,13 @@ async function initializeSession(sessaoId) {
     // Pasta de autenticação
     const authFolder = `./tokens/${session_name}`;
 
-    // Se status é 'desconectado', deletar tokens para forçar novo QR
-    if (sessaoData.status === 'desconectado' && fs.existsSync(authFolder)) {
-      try {
-        fs.rmSync(authFolder, { recursive: true, force: true });
-      } catch (error) {
-        console.error(`[INIT] Erro ao deletar tokens:`, error.message);
-      }
-    }
-
+    // Criar pasta de tokens se não existir
     if (!fs.existsSync(authFolder)) {
       fs.mkdirSync(authFolder, { recursive: true });
     }
+
+    // Verificar se já existem credenciais salvas
+    const hasCredentials = fs.existsSync(`${authFolder}/creds.json`);
 
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
     const { version } = await fetchLatestBaileysVersion();
@@ -561,9 +556,13 @@ async function initializeSession(sessaoId) {
       connected: false
     });
 
+    console.log(`[INIT] Sessão ${session_name} ${hasCredentials ? '(com credenciais)' : '(nova conexão)'}`);
+
     // Evento: Connection Update
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
+
+      console.log(`[CONNECTION] ${session_name}: ${connection || 'undefined'}, hasQR=${!!qr}`);
 
       // Solicitar pairing code se configurado (deve ser feito quando connecting ou qr presente)
       const session = activeSessions.get(session_name);
@@ -582,6 +581,7 @@ async function initializeSession(sessaoId) {
       if (qr && (!session || !session.usePairingCode)) {
         try {
           await queries.updateSessaoQRCode(session_name, qr);
+          console.log(`[QR] QR code salvo no banco`);
         } catch (qrError) {
           console.error(`[QR] Erro ao salvar:`, qrError.message);
         }
@@ -594,9 +594,13 @@ async function initializeSession(sessaoId) {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
+        console.log(`[DISCONNECT] ${session_name}: statusCode=${statusCode}, shouldReconnect=${shouldReconnect}`);
+
         await queries.updateSessaoStatus(sessaoId, 'desconectado', null);
 
+        // Só deletar tokens se for logout explícito ou não autorizado
         if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+          console.log(`[DISCONNECT] Logout detectado, limpando credenciais`);
           try {
             if (fs.existsSync(authFolder)) {
               fs.rmSync(authFolder, { recursive: true, force: true });
@@ -604,13 +608,24 @@ async function initializeSession(sessaoId) {
           } catch (error) {
             console.error(`[ERROR] Erro ao limpar tokens:`, error.message);
           }
+          // Aguardar antes de reconectar
           setTimeout(() => initializeSession(sessaoId), 3000);
         } else if (shouldReconnect) {
+          console.log(`[DISCONNECT] Reconectando em 5 segundos...`);
+          // Reconectar mantendo as credenciais
           setTimeout(() => initializeSession(sessaoId), 5000);
         }
       } else if (connection === 'open') {
         const session = activeSessions.get(session_name);
-        if (session) session.connected = true;
+        if (session) {
+          session.connected = true;
+          // Limpar flags de pairing code após conexão bem-sucedida
+          delete session.usePairingCode;
+          delete session.pairingPhoneNumber;
+          delete session.pairingCode;
+          delete session.pairingCodeGenerated;
+        }
+        console.log(`[CONNECTED] ✓ Sessão ${session_name} conectada com sucesso!`);
         await queries.updateSessaoStatus(sessaoId, 'conectado', null);
       }
     });
