@@ -230,12 +230,11 @@ app.post('/sessoes', async (req, res) => {
     // Criar sessão no banco
     const sessao = await queries.createSessao(clienteId, whatsappNumero, sessionName);
 
-    // Inicializar sessão do WhatsApp (não aguardar conclusão)
-    // QR code será gerado assincronamente via evento
-    initializeSession(sessao.id).catch(error => {
-      console.error(`[API] Erro ao inicializar sessão ${sessao.id}:`, error.message);
-      console.error('[API] Stack:', error.stack);
-    });
+    console.log(`[API] ✓ Sessão criada com ID ${sessao.id}`);
+    console.log(`[API] Para obter QR code, chame: GET /sessoes/${sessao.id}/qr`);
+
+    // Não inicializar aqui - deixar para o GET /qr fazer isso
+    // Isso evita inicializar sessões que nunca serão usadas
 
     res.status(201).json(sessao);
   } catch (error) {
@@ -296,13 +295,59 @@ app.get('/sessoes/:id/qr', async (req, res) => {
       return res.json({ message: 'Sessão já conectada', connected: true });
     }
 
-    if (!sessao.qr_code) {
-      return res.status(404).json({ error: 'QR Code não disponível' });
+    // Se já tem QR code, retorna imediatamente
+    if (sessao.qr_code) {
+      console.log(`[QR API] QR code encontrado no banco para sessão ${req.params.id}`);
+      return res.json({ qr: sessao.qr_code, status: sessao.status });
     }
 
-    res.json({ qr: sessao.qr_code, status: sessao.status });
+    // Se não tem QR code, verificar se a sessão está inicializada
+    const sessionActive = activeSessions.has(sessao.session_name);
+    console.log(`[QR API] Sessão ${sessao.session_name} no Map: ${sessionActive}`);
+
+    if (!sessionActive) {
+      // Sessão não está no Map, inicializar
+      console.log(`[QR API] Inicializando sessão ${req.params.id}...`);
+      initializeSession(parseInt(req.params.id)).catch(error => {
+        console.error(`[QR API] Erro ao inicializar sessão:`, error.message);
+      });
+    }
+
+    // Aguardar QR code ser gerado (polling no banco com timeout)
+    const maxAttempts = 20; // 20 tentativas
+    const delayMs = 500; // 500ms entre tentativas = 10 segundos no total
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      console.log(`[QR API] Aguardando QR code... Tentativa ${attempt}/${maxAttempts}`);
+
+      // Aguardar um pouco
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+
+      // Buscar sessão atualizada do banco
+      const sessaoAtualizada = await queries.getSessaoById(req.params.id);
+
+      if (sessaoAtualizada.qr_code) {
+        console.log(`[QR API] ✓ QR code gerado com sucesso na tentativa ${attempt}`);
+        return res.json({ qr: sessaoAtualizada.qr_code, status: sessaoAtualizada.status });
+      }
+
+      if (sessaoAtualizada.status === 'conectado') {
+        console.log(`[QR API] Sessão conectada durante a espera`);
+        return res.json({ message: 'Sessão já conectada', connected: true });
+      }
+    }
+
+    // Timeout - QR code não foi gerado
+    console.log(`[QR API] ✗ Timeout ao aguardar QR code para sessão ${req.params.id}`);
+    return res.status(408).json({
+      error: 'QR Code não foi gerado a tempo',
+      message: 'Tente novamente em alguns instantes',
+      timeout: true
+    });
+
   } catch (error) {
-    console.error('[API] Erro ao buscar QR:', error.message);
+    console.error('[QR API] Erro ao buscar QR:', error.message);
+    console.error('[QR API] Stack:', error.stack);
     res.status(500).json({ error: error.message });
   }
 });
