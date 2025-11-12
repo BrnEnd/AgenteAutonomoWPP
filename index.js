@@ -301,12 +301,15 @@ app.get('/sessoes/:id/qr', async (req, res) => {
       });
     }
 
-    // Aguardar QR code ser gerado (6 segundos no total)
-    const maxAttempts = 6;
+    // Aguardar QR code ser gerado (até 10 segundos)
+    const maxAttempts = 10;
     const delayMs = 1000;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, delayMs));
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Na primeira tentativa, não espera (busca imediatamente)
+      if (attempt > 0) {
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
 
       const sessaoAtualizada = await queries.getSessaoById(req.params.id);
 
