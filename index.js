@@ -36,7 +36,7 @@ const app = express();
 const corsOptions = {
   origin: [
     'http://localhost:8080',                               // Desenvolvimento local
-    'https://front-agente-autonomo-luv4y5zjl-bruno-alexandrinos-projects.vercel.app/'            // Produção Vercel
+    'https://front-agente-autonomo.vercel.app'            // Produção Vercel
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
