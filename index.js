@@ -544,6 +544,15 @@ async function initializeSession(sessaoId) {
       getMessage: async () => undefined,
     });
 
+    // Preservar flags de pairing code se existirem
+    const existingSession = activeSessions.get(session_name);
+    const pairingFlags = {};
+    if (existingSession) {
+      if (existingSession.usePairingCode) pairingFlags.usePairingCode = existingSession.usePairingCode;
+      if (existingSession.pairingPhoneNumber) pairingFlags.pairingPhoneNumber = existingSession.pairingPhoneNumber;
+      if (existingSession.pairingCodeGenerated !== undefined) pairingFlags.pairingCodeGenerated = existingSession.pairingCodeGenerated;
+    }
+
     // Armazenar sessão no Map
     activeSessions.set(session_name, {
       sock,
@@ -553,10 +562,29 @@ async function initializeSession(sessaoId) {
       contexto: contexto_arquivo,
       sessionName: session_name,
       clienteNome: cliente_nome,
-      connected: false
+      connected: false,
+      ...pairingFlags
     });
 
-    console.log(`[INIT] Sessão ${session_name} ${hasCredentials ? '(com credenciais)' : '(nova conexão)'}`);
+    console.log(`[INIT] Sessão ${session_name} ${hasCredentials ? '(com credenciais)' : '(nova conexão)'}${pairingFlags.usePairingCode ? ' [PAIRING MODE]' : ''}`);
+
+    // Se estiver em modo pairing, tentar solicitar código após um pequeno delay
+    if (pairingFlags.usePairingCode && pairingFlags.pairingPhoneNumber && !pairingFlags.pairingCodeGenerated) {
+      setTimeout(async () => {
+        const currentSession = activeSessions.get(session_name);
+        if (currentSession && !currentSession.pairingCodeGenerated && !currentSession.pairingCode) {
+          try {
+            console.log(`[PAIRING] Solicitando código para ${currentSession.pairingPhoneNumber}`);
+            const code = await sock.requestPairingCode(currentSession.pairingPhoneNumber);
+            currentSession.pairingCode = code;
+            currentSession.pairingCodeGenerated = true;
+            console.log(`[PAIRING] Código gerado: ${code}`);
+          } catch (pairingError) {
+            console.error(`[PAIRING] Erro ao solicitar código:`, pairingError.message);
+          }
+        }
+      }, 2000); // Aguardar 2 segundos para o socket estar pronto
+    }
 
     // Evento: Connection Update
     sock.ev.on('connection.update', async (update) => {
