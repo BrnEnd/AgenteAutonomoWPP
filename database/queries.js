@@ -178,6 +178,9 @@ async function updateSessaoStatus(id, status, qrCode = null) {
  * Atualizar QR Code da sessão
  */
 async function updateSessaoQRCode(sessionName, qrCode) {
+  console.log(`[DB updateSessaoQRCode] session_name="${sessionName}", qrCode length=${qrCode?.length || 'NULL'}`);
+  console.log(`[DB updateSessaoQRCode] qrCode type=${typeof qrCode}, primeiro 50 chars="${qrCode?.substring(0, 50)}"`);
+
   const query = `
     UPDATE sessoes
     SET qr_code = $1, status = 'aguardando_qr'
@@ -185,6 +188,9 @@ async function updateSessaoQRCode(sessionName, qrCode) {
     RETURNING *
   `;
   const result = await db.query(query, [qrCode, sessionName]);
+
+  console.log(`[DB updateSessaoQRCode] Resultado: rows=${result.rowCount}, qr_code no retorno=${result.rows[0]?.qr_code?.length || 'NULL'}`);
+
   return result.rows[0];
 }
 

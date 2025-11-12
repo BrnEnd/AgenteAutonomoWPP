@@ -506,15 +506,14 @@ async function initializeSession(sessaoId) {
       if (qr) {
         console.log(`[QR] ✓ Gerado para ${session_name} (${qr.length} chars)`);
         try {
+          // updateSessaoQRCode já atualiza o status para 'aguardando_qr'
           const updateResult = await queries.updateSessaoQRCode(session_name, qr);
 
           if (updateResult) {
-            console.log(`[QR] ✓ Salvo no banco - ID ${updateResult.id}`);
+            console.log(`[QR] ✓ Salvo no banco - ID ${updateResult.id}, QR: ${updateResult.qr_code?.length || 'NULL'} chars`);
           } else {
             console.error(`[QR] ✗ Update retornou NULL`);
           }
-
-          await queries.updateSessaoStatus(sessaoId, 'aguardando_qr');
         } catch (qrError) {
           console.error(`[QR] ✗ Erro ao salvar:`, qrError.message);
           console.error(`[QR] Stack:`, qrError.stack);
