@@ -359,41 +359,55 @@ app.post('/sessoes/:id/pairing-code', async (req, res) => {
       return res.json({ message: 'Sessão já conectada', connected: true });
     }
 
-    // Se não tem sessão ativa, inicializar
+    // Configurar flag para usar pairing code
+    const session = activeSessions.get(sessao.session_name);
+    if (session) {
+      session.usePairingCode = true;
+      session.pairingPhoneNumber = cleanNumber;
+      session.pairingCodeGenerated = false;
+    }
+
+    // Se não tem sessão ativa, inicializar com pairing code
     if (!activeSessions.has(sessao.session_name)) {
+      // Criar entrada temporária para pairing code
+      activeSessions.set(sessao.session_name, {
+        usePairingCode: true,
+        pairingPhoneNumber: cleanNumber,
+        pairingCodeGenerated: false
+      });
+
       initializeSession(parseInt(req.params.id)).catch(error => {
         console.error(`[PAIRING] Erro ao inicializar:`, error.message);
       });
-
-      // Aguardar socket ser criado
-      await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
-    // Obter sessão ativa
-    const activeSession = activeSessions.get(sessao.session_name);
-    if (!activeSession || !activeSession.sock) {
-      return res.status(503).json({
-        error: 'Sessão não inicializada',
-        message: 'Aguarde alguns segundos e tente novamente'
-      });
+    // Aguardar código ser gerado (até 15 segundos)
+    const maxAttempts = 15;
+    const delayMs = 1000;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+
+      const currentSession = activeSessions.get(sessao.session_name);
+      if (currentSession && currentSession.pairingCode) {
+        return res.json({
+          pairingCode: currentSession.pairingCode,
+          message: 'Digite este código no WhatsApp em Aparelhos Conectados > Conectar Aparelho',
+          phoneNumber: cleanNumber
+        });
+      }
+
+      // Verificar se conectou antes de gerar código
+      const sessaoAtualizada = await queries.getSessaoById(req.params.id);
+      if (sessaoAtualizada.status === 'conectado') {
+        return res.json({ message: 'Sessão conectada com sucesso', connected: true });
+      }
     }
 
-    // Solicitar pairing code
-    try {
-      const code = await activeSession.sock.requestPairingCode(cleanNumber);
-
-      return res.json({
-        pairingCode: code,
-        message: 'Digite este código no WhatsApp em Aparelhos Conectados > Conectar Aparelho',
-        phoneNumber: cleanNumber
-      });
-    } catch (pairingError) {
-      console.error('[PAIRING] Erro ao solicitar código:', pairingError.message);
-      return res.status(500).json({
-        error: 'Erro ao gerar código de emparelhamento',
-        message: pairingError.message
-      });
-    }
+    return res.status(408).json({
+      error: 'Código de emparelhamento não foi gerado a tempo',
+      message: 'Tente novamente'
+    });
 
   } catch (error) {
     console.error('[PAIRING] Erro:', error.message);
@@ -551,7 +565,21 @@ async function initializeSession(sessaoId) {
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      if (qr) {
+      // Solicitar pairing code se configurado (deve ser feito quando connecting ou qr presente)
+      const session = activeSessions.get(session_name);
+      if (session && session.usePairingCode && !session.pairingCodeGenerated && (connection === 'connecting' || qr)) {
+        try {
+          console.log(`[PAIRING] Solicitando código para ${session.pairingPhoneNumber}`);
+          const code = await sock.requestPairingCode(session.pairingPhoneNumber);
+          session.pairingCode = code;
+          session.pairingCodeGenerated = true;
+          console.log(`[PAIRING] Código gerado: ${code}`);
+        } catch (pairingError) {
+          console.error(`[PAIRING] Erro ao solicitar código:`, pairingError.message);
+        }
+      }
+
+      if (qr && (!session || !session.usePairingCode)) {
         try {
           await queries.updateSessaoQRCode(session_name, qr);
         } catch (qrError) {
