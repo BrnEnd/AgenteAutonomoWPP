@@ -284,21 +284,27 @@ app.get('/sessoes/:id/qr', async (req, res) => {
       return res.status(404).json({ error: 'Sessão não encontrada' });
     }
 
+    console.log(`[GET QR] Sessão ${req.params.id}: status=${sessao.status}, qr_code=${sessao.qr_code ? sessao.qr_code.length + ' chars' : 'NULL'}`);
+
     if (sessao.status === 'conectado') {
       return res.json({ message: 'Sessão já conectada', connected: true });
     }
 
     // Se já tem QR code, retorna imediatamente
     if (sessao.qr_code) {
+      console.log(`[GET QR] Retornando QR code existente`);
       return res.json({ qr: sessao.qr_code, status: sessao.status });
     }
 
     // Se não tem QR code, verificar se a sessão está inicializada
     if (!activeSessions.has(sessao.session_name)) {
+      console.log(`[GET QR] Inicializando sessão ${sessao.session_name}`);
       // Inicializar sessão
       initializeSession(parseInt(req.params.id)).catch(error => {
         console.error(`[QR] Erro ao inicializar:`, error.message);
       });
+    } else {
+      console.log(`[GET QR] Sessão já está no Map, aguardando QR...`);
     }
 
     // Aguardar QR code ser gerado (até 10 segundos)
@@ -312,8 +318,10 @@ app.get('/sessoes/:id/qr', async (req, res) => {
       }
 
       const sessaoAtualizada = await queries.getSessaoById(req.params.id);
+      console.log(`[GET QR] Tentativa ${attempt + 1}/${maxAttempts}: QR=${sessaoAtualizada.qr_code ? 'ENCONTRADO' : 'NULL'}, status=${sessaoAtualizada.status}`);
 
       if (sessaoAtualizada.qr_code) {
+        console.log(`[GET QR] ✓ QR code encontrado na tentativa ${attempt + 1}`);
         return res.json({ qr: sessaoAtualizada.qr_code, status: sessaoAtualizada.status });
       }
 
@@ -482,13 +490,22 @@ async function initializeSession(sessaoId) {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log(`[QR] Gerado para ${session_name}`);
+        console.log(`[QR] Gerado para ${session_name} (${qr.length} chars)`);
+        console.log(`[QR] Salvando sessaoId=${sessaoId}, session_name=${session_name}`);
         try {
-          await queries.updateSessaoQRCode(session_name, qr);
+          const updateResult = await queries.updateSessaoQRCode(session_name, qr);
+          console.log(`[QR] Update result:`, updateResult ? 'OK' : 'NULL');
+
+          if (updateResult) {
+            console.log(`[QR] ✓ Salvo - ID ${updateResult.id}, QR length: ${updateResult.qr_code?.length || 'NULL'}`);
+          } else {
+            console.error(`[QR] ✗ Update retornou NULL - session_name não encontrado?`);
+          }
+
           await queries.updateSessaoStatus(sessaoId, 'aguardando_qr');
-          console.log(`[QR] Salvo no banco`);
         } catch (qrError) {
-          console.error(`[QR] Erro ao salvar:`, qrError.message);
+          console.error(`[QR] ✗ Erro ao salvar:`, qrError.message);
+          console.error(`[QR] Stack:`, qrError.stack);
         }
       }
 
