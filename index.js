@@ -446,6 +446,18 @@ async function initializeSession(sessaoId) {
 
     // Pasta de autenticação
     const authFolder = `./tokens/${session_name}`;
+
+    // Se status é 'desconectado' e não é primeira inicialização,
+    // deletar tokens para forçar novo QR
+    if (sessaoData.status === 'desconectado' && fs.existsSync(authFolder)) {
+      console.log(`[INIT] Deletando tokens antigos para forçar novo QR`);
+      try {
+        fs.rmSync(authFolder, { recursive: true, force: true });
+      } catch (error) {
+        console.error(`[INIT] Erro ao deletar tokens:`, error.message);
+      }
+    }
+
     if (!fs.existsSync(authFolder)) {
       fs.mkdirSync(authFolder, { recursive: true });
     }
@@ -489,17 +501,17 @@ async function initializeSession(sessaoId) {
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
+      console.log(`[CONNECTION] ${session_name}: connection=${connection}, hasQR=${!!qr}`);
+
       if (qr) {
-        console.log(`[QR] Gerado para ${session_name} (${qr.length} chars)`);
-        console.log(`[QR] Salvando sessaoId=${sessaoId}, session_name=${session_name}`);
+        console.log(`[QR] ✓ Gerado para ${session_name} (${qr.length} chars)`);
         try {
           const updateResult = await queries.updateSessaoQRCode(session_name, qr);
-          console.log(`[QR] Update result:`, updateResult ? 'OK' : 'NULL');
 
           if (updateResult) {
-            console.log(`[QR] ✓ Salvo - ID ${updateResult.id}, QR length: ${updateResult.qr_code?.length || 'NULL'}`);
+            console.log(`[QR] ✓ Salvo no banco - ID ${updateResult.id}`);
           } else {
-            console.error(`[QR] ✗ Update retornou NULL - session_name não encontrado?`);
+            console.error(`[QR] ✗ Update retornou NULL`);
           }
 
           await queries.updateSessaoStatus(sessaoId, 'aguardando_qr');
