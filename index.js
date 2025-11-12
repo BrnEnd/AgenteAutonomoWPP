@@ -284,27 +284,20 @@ app.get('/sessoes/:id/qr', async (req, res) => {
       return res.status(404).json({ error: 'Sessão não encontrada' });
     }
 
-    console.log(`[GET QR] Sessão ${req.params.id}: status=${sessao.status}, qr_code=${sessao.qr_code ? sessao.qr_code.length + ' chars' : 'NULL'}`);
-
     if (sessao.status === 'conectado') {
       return res.json({ message: 'Sessão já conectada', connected: true });
     }
 
     // Se já tem QR code, retorna imediatamente
     if (sessao.qr_code) {
-      console.log(`[GET QR] Retornando QR code existente`);
       return res.json({ qr: sessao.qr_code, status: sessao.status });
     }
 
     // Se não tem QR code, verificar se a sessão está inicializada
     if (!activeSessions.has(sessao.session_name)) {
-      console.log(`[GET QR] Inicializando sessão ${sessao.session_name}`);
-      // Inicializar sessão
       initializeSession(parseInt(req.params.id)).catch(error => {
         console.error(`[QR] Erro ao inicializar:`, error.message);
       });
-    } else {
-      console.log(`[GET QR] Sessão já está no Map, aguardando QR...`);
     }
 
     // Aguardar QR code ser gerado (até 10 segundos)
@@ -312,16 +305,13 @@ app.get('/sessoes/:id/qr', async (req, res) => {
     const delayMs = 1000;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      // Na primeira tentativa, não espera (busca imediatamente)
       if (attempt > 0) {
         await new Promise(resolve => setTimeout(resolve, delayMs));
       }
 
       const sessaoAtualizada = await queries.getSessaoById(req.params.id);
-      console.log(`[GET QR] Tentativa ${attempt + 1}/${maxAttempts}: QR=${sessaoAtualizada.qr_code ? 'ENCONTRADO' : 'NULL'}, status=${sessaoAtualizada.status}`);
 
       if (sessaoAtualizada.qr_code) {
-        console.log(`[GET QR] ✓ QR code encontrado na tentativa ${attempt + 1}`);
         return res.json({ qr: sessaoAtualizada.qr_code, status: sessaoAtualizada.status });
       }
 
@@ -331,7 +321,6 @@ app.get('/sessoes/:id/qr', async (req, res) => {
     }
 
     // Timeout
-    console.error(`[QR] Timeout sessão ${req.params.id}`);
     return res.status(408).json({
       error: 'QR Code não foi gerado a tempo',
       message: 'Tente novamente em alguns instantes'
@@ -429,16 +418,12 @@ async function gerarRespostaIA(perguntaDoUsuario, contextoCliente) {
 // ----------------------
 async function initializeSession(sessaoId) {
   try {
-    console.log(`[INIT] Sessão ${sessaoId}`);
-
     const sessaoData = await queries.getSessaoById(sessaoId);
     if (!sessaoData) {
-      console.error(`[INIT] Sessão ${sessaoId} não encontrada`);
       return;
     }
 
     if (!sessaoData.cliente_ativo) {
-      console.error(`[INIT] Cliente inativo`);
       return;
     }
 
@@ -447,10 +432,8 @@ async function initializeSession(sessaoId) {
     // Pasta de autenticação
     const authFolder = `./tokens/${session_name}`;
 
-    // Se status é 'desconectado' e não é primeira inicialização,
-    // deletar tokens para forçar novo QR
+    // Se status é 'desconectado', deletar tokens para forçar novo QR
     if (sessaoData.status === 'desconectado' && fs.existsSync(authFolder)) {
-      console.log(`[INIT] Deletando tokens antigos para forçar novo QR`);
       try {
         fs.rmSync(authFolder, { recursive: true, force: true });
       } catch (error) {
@@ -468,7 +451,7 @@ async function initializeSession(sessaoId) {
     // Criar socket do Baileys
     const sock = makeWASocket({
       auth: state,
-      printQRInTerminal: true, // Debug: imprimir QR no terminal para validação
+      printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
       version,
       browser: ['Chrome (Linux)', 'Chrome', '121.0.0.0'],
@@ -495,32 +478,15 @@ async function initializeSession(sessaoId) {
       connected: false
     });
 
-    console.log(`[INIT] OK - ${session_name}`);
-
     // Evento: Connection Update
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      console.log(`[CONNECTION] ${session_name}: connection=${connection}, hasQR=${!!qr}`);
-
       if (qr) {
-        console.log(`[QR] ✓ Gerado para ${session_name} (${qr.length} chars)`);
-        console.log(`[QR] String completa:`, qr);
-        console.log(`[QR] Tipo:`, typeof qr);
-        console.log(`[QR] Primeiros 100 chars:`, qr.substring(0, 100));
-
         try {
-          // updateSessaoQRCode já atualiza o status para 'aguardando_qr'
-          const updateResult = await queries.updateSessaoQRCode(session_name, qr);
-
-          if (updateResult) {
-            console.log(`[QR] ✓ Salvo no banco - ID ${updateResult.id}, QR: ${updateResult.qr_code?.length || 'NULL'} chars`);
-          } else {
-            console.error(`[QR] ✗ Update retornou NULL`);
-          }
+          await queries.updateSessaoQRCode(session_name, qr);
         } catch (qrError) {
-          console.error(`[QR] ✗ Erro ao salvar:`, qrError.message);
-          console.error(`[QR] Stack:`, qrError.stack);
+          console.error(`[QR] Erro ao salvar:`, qrError.message);
         }
       }
 
@@ -534,7 +500,6 @@ async function initializeSession(sessaoId) {
         await queries.updateSessaoStatus(sessaoId, 'desconectado', null);
 
         if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-          console.log(`[STATUS] Sessão expirada, limpando tokens`);
           try {
             if (fs.existsSync(authFolder)) {
               fs.rmSync(authFolder, { recursive: true, force: true });
@@ -549,7 +514,6 @@ async function initializeSession(sessaoId) {
       } else if (connection === 'open') {
         const session = activeSessions.get(session_name);
         if (session) session.connected = true;
-        console.log(`[STATUS] Conectada: ${session_name}`);
         await queries.updateSessaoStatus(sessaoId, 'conectado', null);
       }
     });
