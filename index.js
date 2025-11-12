@@ -36,7 +36,7 @@ const app = express();
 const corsOptions = {
   origin: [
     'http://localhost:8080',                               // Desenvolvimento local
-    'https://front-agente-autonomo-luv4y5zjl-bruno-alexandrinos-projects.vercel.app/'            // Produção Vercel
+    'https://front-agente-autonomo.vercel.app'            // Produção Vercel
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
@@ -295,6 +295,7 @@ app.get('/sessoes/:id/qr', async (req, res) => {
 
     // Se não tem QR code, verificar se a sessão está inicializada
     if (!activeSessions.has(sessao.session_name)) {
+      // Inicializar sessão
       initializeSession(parseInt(req.params.id)).catch(error => {
         console.error(`[QR] Erro ao inicializar:`, error.message);
       });
@@ -305,6 +306,7 @@ app.get('/sessoes/:id/qr', async (req, res) => {
     const delayMs = 1000;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Na primeira tentativa, não espera (busca imediatamente)
       if (attempt > 0) {
         await new Promise(resolve => setTimeout(resolve, delayMs));
       }
@@ -321,6 +323,7 @@ app.get('/sessoes/:id/qr', async (req, res) => {
     }
 
     // Timeout
+    console.error(`[QR] Timeout sessão ${req.params.id}`);
     return res.status(408).json({
       error: 'QR Code não foi gerado a tempo',
       message: 'Tente novamente em alguns instantes'
@@ -328,89 +331,6 @@ app.get('/sessoes/:id/qr', async (req, res) => {
 
   } catch (error) {
     console.error('[QR] Erro:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Solicitar código de emparelhamento (pairing code)
-app.post('/sessoes/:id/pairing-code', async (req, res) => {
-  try {
-    const { phoneNumber } = req.body;
-
-    if (!phoneNumber) {
-      return res.status(400).json({ error: 'phoneNumber é obrigatório' });
-    }
-
-    // Validar formato do número (apenas dígitos, sem +)
-    const cleanNumber = phoneNumber.replace(/\D/g, '');
-    if (cleanNumber.length < 10) {
-      return res.status(400).json({
-        error: 'Número inválido',
-        message: 'Formato esperado: 5511999999999 (código país + DDD + número)'
-      });
-    }
-
-    const sessao = await queries.getSessaoById(req.params.id);
-    if (!sessao) {
-      return res.status(404).json({ error: 'Sessão não encontrada' });
-    }
-
-    if (sessao.status === 'conectado') {
-      return res.json({ message: 'Sessão já conectada', connected: true });
-    }
-
-    // Configurar flag para usar pairing code
-    const session = activeSessions.get(sessao.session_name);
-    if (session) {
-      session.usePairingCode = true;
-      session.pairingPhoneNumber = cleanNumber;
-      session.pairingCodeGenerated = false;
-    }
-
-    // Se não tem sessão ativa, inicializar com pairing code
-    if (!activeSessions.has(sessao.session_name)) {
-      // Criar entrada temporária para pairing code
-      activeSessions.set(sessao.session_name, {
-        usePairingCode: true,
-        pairingPhoneNumber: cleanNumber,
-        pairingCodeGenerated: false
-      });
-
-      initializeSession(parseInt(req.params.id)).catch(error => {
-        console.error(`[PAIRING] Erro ao inicializar:`, error.message);
-      });
-    }
-
-    // Aguardar código ser gerado (até 15 segundos)
-    const maxAttempts = 15;
-    const delayMs = 1000;
-
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, delayMs));
-
-      const currentSession = activeSessions.get(sessao.session_name);
-      if (currentSession && currentSession.pairingCode) {
-        return res.json({
-          pairingCode: currentSession.pairingCode,
-          message: 'Digite este código no WhatsApp em Aparelhos Conectados > Conectar Aparelho',
-          phoneNumber: cleanNumber
-        });
-      }
-
-      // Verificar se conectou antes de gerar código
-      const sessaoAtualizada = await queries.getSessaoById(req.params.id);
-      if (sessaoAtualizada.status === 'conectado') {
-        return res.json({ message: 'Sessão conectada com sucesso', connected: true });
-      }
-    }
-
-    return res.status(408).json({
-      error: 'Código de emparelhamento não foi gerado a tempo',
-      message: 'Tente novamente'
-    });
-
-  } catch (error) {
-    console.error('[PAIRING] Erro:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -501,12 +421,16 @@ async function gerarRespostaIA(perguntaDoUsuario, contextoCliente) {
 // ----------------------
 async function initializeSession(sessaoId) {
   try {
+    console.log(`[INIT] Sessão ${sessaoId}`);
+
     const sessaoData = await queries.getSessaoById(sessaoId);
     if (!sessaoData) {
+      console.error(`[INIT] Sessão ${sessaoId} não encontrada`);
       return;
     }
 
     if (!sessaoData.cliente_ativo) {
+      console.error(`[INIT] Cliente inativo`);
       return;
     }
 
@@ -514,14 +438,9 @@ async function initializeSession(sessaoId) {
 
     // Pasta de autenticação
     const authFolder = `./tokens/${session_name}`;
-
-    // Criar pasta de tokens se não existir
     if (!fs.existsSync(authFolder)) {
       fs.mkdirSync(authFolder, { recursive: true });
     }
-
-    // Verificar se já existem credenciais salvas
-    const hasCredentials = fs.existsSync(`${authFolder}/creds.json`);
 
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
     const { version } = await fetchLatestBaileysVersion();
@@ -556,32 +475,18 @@ async function initializeSession(sessaoId) {
       connected: false
     });
 
-    console.log(`[INIT] Sessão ${session_name} ${hasCredentials ? '(com credenciais)' : '(nova conexão)'}`);
+    console.log(`[INIT] OK - ${session_name}`);
 
     // Evento: Connection Update
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      console.log(`[CONNECTION] ${session_name}: ${connection || 'undefined'}, hasQR=${!!qr}`);
-
-      // Solicitar pairing code se configurado (deve ser feito quando connecting ou qr presente)
-      const session = activeSessions.get(session_name);
-      if (session && session.usePairingCode && !session.pairingCodeGenerated && (connection === 'connecting' || qr)) {
-        try {
-          console.log(`[PAIRING] Solicitando código para ${session.pairingPhoneNumber}`);
-          const code = await sock.requestPairingCode(session.pairingPhoneNumber);
-          session.pairingCode = code;
-          session.pairingCodeGenerated = true;
-          console.log(`[PAIRING] Código gerado: ${code}`);
-        } catch (pairingError) {
-          console.error(`[PAIRING] Erro ao solicitar código:`, pairingError.message);
-        }
-      }
-
-      if (qr && (!session || !session.usePairingCode)) {
+      if (qr) {
+        console.log(`[QR] Gerado para ${session_name}`);
         try {
           await queries.updateSessaoQRCode(session_name, qr);
-          console.log(`[QR] QR code salvo no banco`);
+          await queries.updateSessaoStatus(sessaoId, 'aguardando_qr');
+          console.log(`[QR] Salvo no banco`);
         } catch (qrError) {
           console.error(`[QR] Erro ao salvar:`, qrError.message);
         }
@@ -594,13 +499,10 @@ async function initializeSession(sessaoId) {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-        console.log(`[DISCONNECT] ${session_name}: statusCode=${statusCode}, shouldReconnect=${shouldReconnect}`);
-
         await queries.updateSessaoStatus(sessaoId, 'desconectado', null);
 
-        // Só deletar tokens se for logout explícito ou não autorizado
         if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-          console.log(`[DISCONNECT] Logout detectado, limpando credenciais`);
+          console.log(`[STATUS] Sessão expirada, limpando tokens`);
           try {
             if (fs.existsSync(authFolder)) {
               fs.rmSync(authFolder, { recursive: true, force: true });
@@ -608,24 +510,14 @@ async function initializeSession(sessaoId) {
           } catch (error) {
             console.error(`[ERROR] Erro ao limpar tokens:`, error.message);
           }
-          // Aguardar antes de reconectar
           setTimeout(() => initializeSession(sessaoId), 3000);
         } else if (shouldReconnect) {
-          console.log(`[DISCONNECT] Reconectando em 5 segundos...`);
-          // Reconectar mantendo as credenciais
           setTimeout(() => initializeSession(sessaoId), 5000);
         }
       } else if (connection === 'open') {
         const session = activeSessions.get(session_name);
-        if (session) {
-          session.connected = true;
-          // Limpar flags de pairing code após conexão bem-sucedida
-          delete session.usePairingCode;
-          delete session.pairingPhoneNumber;
-          delete session.pairingCode;
-          delete session.pairingCodeGenerated;
-        }
-        console.log(`[CONNECTED] ✓ Sessão ${session_name} conectada com sucesso!`);
+        if (session) session.connected = true;
+        console.log(`[STATUS] Conectada: ${session_name}`);
         await queries.updateSessaoStatus(sessaoId, 'conectado', null);
       }
     });
