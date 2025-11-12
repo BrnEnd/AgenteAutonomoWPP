@@ -510,6 +510,8 @@ async function initializeSession(sessaoId) {
 
           if (updateResult) {
             console.log(`[QR] ✓ Salvo no banco - ID ${updateResult.id}`);
+            console.log(`[QR] Verificação: qr_code no resultado = ${updateResult.qr_code ? updateResult.qr_code.length + ' chars' : 'NULL'}`);
+            console.log(`[QR] Verificação: status no resultado = ${updateResult.status}`);
           } else {
             console.error(`[QR] ✗ Update retornou NULL`);
           }
