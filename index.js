@@ -468,7 +468,7 @@ async function initializeSession(sessaoId) {
     // Criar socket do Baileys
     const sock = makeWASocket({
       auth: state,
-      printQRInTerminal: false,
+      printQRInTerminal: true, // Debug: imprimir QR no terminal para validação
       logger: pino({ level: 'silent' }),
       version,
       browser: ['Chrome (Linux)', 'Chrome', '121.0.0.0'],
@@ -505,6 +505,10 @@ async function initializeSession(sessaoId) {
 
       if (qr) {
         console.log(`[QR] ✓ Gerado para ${session_name} (${qr.length} chars)`);
+        console.log(`[QR] String completa:`, qr);
+        console.log(`[QR] Tipo:`, typeof qr);
+        console.log(`[QR] Primeiros 100 chars:`, qr.substring(0, 100));
+
         try {
           // updateSessaoQRCode já atualiza o status para 'aguardando_qr'
           const updateResult = await queries.updateSessaoQRCode(session_name, qr);
